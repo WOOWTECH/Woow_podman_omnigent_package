@@ -62,7 +62,7 @@ Environment=OMNIGENT_AUTH_ENABLED=1
 # account invite emails and OAuth redirects resolve correctly.
 Environment=OMNIGENT_ACCOUNTS_BASE_URL=https://woow-openclaw-services-1.tailb7a69b.ts.net:9444
 
-HealthCmd=curl -sf http://127.0.0.1:8000/healthz || exit 1
+HealthCmd=curl -sf http://127.0.0.1:8000/health || exit 1
 HealthInterval=30s
 HealthTimeout=10s
 HealthStartPeriod=30s

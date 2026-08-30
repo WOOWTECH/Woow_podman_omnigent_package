@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Smoke: 3 containers up, server /healthz 200, postgres pg_isready green.
+# Smoke: 3 containers up, server /health 200 JSON, postgres pg_isready green.
+# NB: /healthz is shadowed by the React SPA catch-all and returns HTML 200
+# even when the API is dead — use /health instead ({"status":"ok"} JSON).
 set -uo pipefail
 
 PASS_N=0; FAIL_N=0
@@ -31,8 +33,8 @@ fi
 
 echo
 echo "== Server HTTP surface (loopback) =="
-CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/healthz)"
-[ "${CODE}" = "200" ] && ok "/healthz -> 200" || bad "/healthz -> ${CODE}"
+CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/health)"
+[ "${CODE}" = "200" ] && ok "/health -> 200" || bad "/health -> ${CODE}"
 
 CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/)"
 case "${CODE}" in

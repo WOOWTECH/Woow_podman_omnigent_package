@@ -2,7 +2,7 @@
 # omnigent-runner-loop — long-lived entrypoint for the runner container.
 #
 # Boot sequence:
-#   1. Wait for omnigent-server /healthz.
+#   1. Wait for omnigent-server /health.
 #   2. If ~/.omnigent/auth_tokens.json is missing (fresh container FS,
 #      since $HOME is baked into the image, not a volume), POST
 #      /auth/login with OMNIGENT_ADMIN_{USERNAME,PASSWORD} and write the
@@ -32,12 +32,15 @@ log "PI wrapper:   ${OMNIGENT_PI_PATH:-<unset>}"
 
 # --- 1. Wait for server -------------------------------------------------
 if [ -n "${OMNIGENT_SERVER_URL:-}" ]; then
-    log "waiting for omnigent-server /healthz"
+    # NB: use /health (returns {"status":"ok"} JSON), NOT /healthz.
+    # /healthz is shadowed by the React SPA catch-all and returns HTML 200
+    # even when the API is dead — a probe against it will "pass" forever.
+    log "waiting for omnigent-server /health"
     i=0
-    until curl -sSf --max-time 3 "${OMNIGENT_SERVER_URL}/healthz" >/dev/null 2>&1; do
+    until curl -sSf --max-time 3 "${OMNIGENT_SERVER_URL}/health" >/dev/null 2>&1; do
         i=$((i + 1))
         if [ "$i" -ge 60 ]; then
-            log "omnigent-server /healthz not answering after 5 min — bailing to sleep-forever"
+            log "omnigent-server /health not answering after 5 min — bailing to sleep-forever"
             exec sleep infinity
         fi
         sleep 5

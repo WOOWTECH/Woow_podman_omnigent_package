@@ -60,7 +60,9 @@ cd Woow_podman_omnigent_package
 ```
 
 啟動順序：`omnigent-postgres` → `omnigent-server` → `omnigent-runner`。
-install.sh 會等 server 回應 `/healthz` 才收工。
+install.sh 會等 server 回應 `/health`（JSON `{"status":"ok"}`）才收工。
+**不要**把 `/healthz` 當 liveness probe — React SPA catch-all 把 `/healthz`
+變成回 `index.html` HTTP 200，即使 API 死了 probe 也永遠綠燈。
 
 跳過 runner image 重 build：`OD_SKIP_BUILD=1 ./scripts/install.sh`。
 
@@ -117,7 +119,7 @@ scripts/
   install.sh                 build runner + install units + 依序啟動
   uninstall.sh               down；--purge 刪 data volume
 tests/
-  smoke-container.sh         3 個 up + server /healthz + pg_isready
+  smoke-container.sh         3 個 up + server /health + pg_isready
   smoke-pi-integration.sh    pi + wrapper + volume + env 都對
   smoke-runner-dialin.sh     runner 可從私有網段連到 server
 docs/plans/                  塑造本 package 的設計決策
@@ -129,7 +131,7 @@ docs/plans/                  塑造本 package 的設計決策
 ## 驗收部署
 
 ```bash
-bash tests/smoke-container.sh          # 3 up、/healthz 200、pg_isready
+bash tests/smoke-container.sh          # 3 up、/health 200 JSON、pg_isready
 bash tests/smoke-pi-integration.sh     # pi + wrapper + volume + env
 bash tests/smoke-runner-dialin.sh      # runner → server 通
 ```

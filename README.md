@@ -69,8 +69,10 @@ cd Woow_podman_omnigent_package
 ```
 
 Startup order: `omnigent-postgres` → `omnigent-server` → `omnigent-runner`.
-The install script waits for the server to answer `/healthz` before
-returning.
+The install script waits for the server to answer `/health` (JSON
+`{"status":"ok"}`) before returning. **Do not swap `/healthz` in as a
+liveness probe** — the React SPA catch-all serves `index.html` for that
+path with HTTP 200 even when the API is dead, so probes never fail.
 
 Skip the runner image rebuild with `OD_SKIP_BUILD=1 ./scripts/install.sh`.
 
@@ -130,7 +132,7 @@ scripts/
   install.sh                 build runner + install units + start in dependency order
   uninstall.sh               down; --purge deletes data volumes
 tests/
-  smoke-container.sh         3 containers up + server /healthz + pg_isready
+  smoke-container.sh         3 containers up + server /health + pg_isready
   smoke-pi-integration.sh    pi 0.83.0 + pi-code + /data/pi-agent visible + env
   smoke-runner-dialin.sh     runner can reach server over private network
 docs/plans/                  design decisions for the changes shaping this package
@@ -142,7 +144,7 @@ docs/plans/                  design decisions for the changes shaping this packa
 ## Verifying a deployment
 
 ```bash
-bash tests/smoke-container.sh          # 3 up, /healthz 200, pg_isready
+bash tests/smoke-container.sh          # 3 up, /health 200 JSON, pg_isready
 bash tests/smoke-pi-integration.sh     # pi + wrapper + volume + env
 bash tests/smoke-runner-dialin.sh      # runner -> server reachable
 ```

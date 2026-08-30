@@ -64,9 +64,12 @@ systemctl --user start omnigent-server.service
 systemctl --user start omnigent-runner.service
 systemctl --user enable --now omnigent-server-health.timer
 
-say "Waiting for omnigent-server /healthz"
+say "Waiting for omnigent-server /health"
 for i in $(seq 1 60); do
-    if curl -sSf -o /dev/null http://127.0.0.1:8000/healthz 2>/dev/null; then
+    # /health returns JSON {"status":"ok"}. Do NOT use /healthz — the
+    # React SPA catch-all serves index.html with HTTP 200 for that path
+    # even when the API is dead, so the probe passes forever.
+    if curl -sSf -o /dev/null http://127.0.0.1:8000/health 2>/dev/null; then
         say "  ready after ~$((i*2))s"
         break
     fi
