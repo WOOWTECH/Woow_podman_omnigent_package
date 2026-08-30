@@ -87,7 +87,16 @@ RUN npm install -g --omit=dev --no-fund --no-audit \
 # compiler needed in the image.
 RUN pip3 install --no-cache-dir \
       "omnigent==${OMNIGENT_VERSION}" \
- && omnigent --version
+ && omnigent --version \
+ && rm -rf /omnigent-home/.omnigent
+# The `omnigent --version` above initialises $HOME/.omnigent/logs/cli
+# as a side effect (its cli_diagnostics.setup_cli_logging fires
+# unconditionally). At build time that runs as container root (uid 0),
+# so the directory ends up owned uid=0 with mode 0755. At runtime with
+# rootless podman + UserNS=keep-id, the container "root" is the host's
+# uid 1000 — a different uid than the image's baked-in uid 0 — and
+# therefore cannot write inside the 0755 .omnigent tree. Wipe it so
+# the runtime user creates a fresh, correctly-owned copy on first use.
 
 # --- Rootfs overlay ------------------------------------------------------
 #   /usr/local/bin/pi-code               — HOME rescoping wrapper
