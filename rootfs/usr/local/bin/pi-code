@@ -29,9 +29,27 @@ export PI_CODING_AGENT_DIR="${PI_AGENT_DATA_DIR}"
 export PI_TELEMETRY="${PI_TELEMETRY:-0}"
 export PI_SKIP_VERSION_CHECK="${PI_SKIP_VERSION_CHECK:-1}"
 
-# PATH lookup instead of hardcoding /usr/local/bin/pi — code-server's
-# codercom base image installs npm globals to /usr/local/bin, but this
-# runner image (python:3.12-slim + apt nodejs) puts them at /usr/bin.
-# `pi` on PATH resolves to whichever the image actually has, and stays
-# correct if the npm prefix ever changes.
-exec pi "$@"
+# Exec the pi CLI's cli.js by ABSOLUTE path (not `pi` via PATH). This
+# runner image aliases /usr/bin/pi to this wrapper (Containerfile
+# below) so that omnigent's tmux-spawn — which hardcodes /usr/bin/pi
+# and ignores OMNIGENT_PI_PATH — still routes through us. `exec pi`
+# via PATH would infinite-loop under that aliasing; the absolute path
+# to cli.js short-circuits the loop.
+#
+# Fallback probes handle npm-prefix drift between base images:
+#   /usr/lib   — Debian nodesource default (this runner + pi-agent-package)
+#   /usr/local — codercom/code-server default
+CLI=""
+for candidate in \
+  /usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js \
+  /usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js
+do
+  [ -f "${candidate}" ] && { CLI="${candidate}"; break; }
+done
+
+if [ -z "${CLI}" ]; then
+  echo "pi-code: could not locate pi cli.js under /usr/(local/)?lib/node_modules." >&2
+  exit 127
+fi
+
+exec node "${CLI}" "$@"

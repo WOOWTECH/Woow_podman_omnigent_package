@@ -102,7 +102,20 @@ RUN pip3 install --no-cache-dir \
 #   /usr/local/bin/pi-code               — HOME rescoping wrapper
 #   /usr/local/bin/omnigent-runner-loop  — long-lived runner entrypoint
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/pi-code /usr/local/bin/omnigent-runner-loop
+RUN chmod +x /usr/local/bin/pi-code /usr/local/bin/omnigent-runner-loop \
+ # Alias /usr/bin/pi to the wrapper. omnigent's native pi integration
+ # hardcodes `/usr/bin/pi` in its tmux spawn command line and ignores
+ # OMNIGENT_PI_PATH — verified live on the runner, PID 92's argv shows
+ # `new-session -d ... /usr/bin/pi --extension ... --session-dir ...`.
+ # Replacing /usr/bin/pi with our wrapper is the only way to get
+ # omnigent's pi subprocess to inherit HOME=/data/pi-agent/home and
+ # therefore share pi's auth/models with pi-web / OD / code-server.
+ # Omnigent still pins its OWN session-dir via --session-dir so
+ # conversation history stays omnigent-tracked — that separation is
+ # by design and unaffected by the HOME rescoping.
+ && rm -f /usr/bin/pi \
+ && ln -s /usr/local/bin/pi-code /usr/bin/pi \
+ && ls -l /usr/bin/pi
 
 # The upstream image runs as root; we mirror that here because the
 # omnigent CLI writes to $HOME/.omnigent/ and rootless podman with
