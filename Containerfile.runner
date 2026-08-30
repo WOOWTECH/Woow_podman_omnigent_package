@@ -49,9 +49,13 @@ RUN apt-get update \
 # Same version the sibling deployments pin (pi-web 0.13.2, code-server
 # package v1, OD Dockerfile.full). Bump this and the sibling packages
 # together — the pi-agent-data on-disk schema is not versioned.
+# `pi --version` may emit an "outdated" advisory line as an extra stdout
+# line even with PI_SKIP_VERSION_CHECK=1. Match the version substring
+# anywhere in the first line instead of the whole output — a build-time
+# smoke test to catch "wrong tarball" without failing on cosmetic noise.
 RUN npm install -g --omit=dev --no-fund --no-audit \
       "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
- && test "$(pi --version)" = "${PI_CODING_AGENT_VERSION}"
+ && pi --version 2>&1 | head -1 | grep -qF "${PI_CODING_AGENT_VERSION}"
 
 # --- omnigent runtime ----------------------------------------------------
 # Debian 12's system python is old but adequate for pip-installing pure
