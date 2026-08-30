@@ -29,4 +29,9 @@ export PI_CODING_AGENT_DIR="${PI_AGENT_DATA_DIR}"
 export PI_TELEMETRY="${PI_TELEMETRY:-0}"
 export PI_SKIP_VERSION_CHECK="${PI_SKIP_VERSION_CHECK:-1}"
 
-exec /usr/local/bin/pi "$@"
+# PATH lookup instead of hardcoding /usr/local/bin/pi — code-server's
+# codercom base image installs npm globals to /usr/local/bin, but this
+# runner image (python:3.12-slim + apt nodejs) puts them at /usr/bin.
+# `pi` on PATH resolves to whichever the image actually has, and stays
+# correct if the npm prefix ever changes.
+exec pi "$@"
