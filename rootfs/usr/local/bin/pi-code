@@ -1,0 +1,32 @@
+#!/bin/sh
+# pi-code — HOME re-scoping wrapper. Byte-identical (modulo comments)
+# to the same-named file in Woow_podman_code_server_package. Kept in
+# this repo directly rather than symlinked from the sibling so this
+# image builds standalone.
+#
+# The whole point of this wrapper is `export HOME=/data/pi-agent/home`
+# BEFORE exec'ing pi. Without it a pi subprocess spawned here would
+# read/write its session state at /root/.pi/agent/... (the container's
+# ephemeral HOME) and be invisible to pi-web, OD, code-server —
+# defeating the shared pi-agent-data volume's whole reason for being.
+#
+# Called from the omnigent runner via OMNIGENT_PI_PATH=/usr/local/bin/pi-code
+# — the runner treats us as if we ARE pi, arg-passthrough works because
+# we exec pi at the end.
+set -eu
+
+: "${PI_AGENT_DATA_DIR:=/data/pi-agent}"
+
+if [ ! -d "${PI_AGENT_DATA_DIR}" ]; then
+    echo "pi-code: ${PI_AGENT_DATA_DIR} is not mounted." >&2
+    echo "pi-code: mount the pi-agent-data podman volume (owned by the sibling" >&2
+    echo "pi-code: Woow_podman_pi_agent_package deployment) at that path."      >&2
+    exit 78
+fi
+
+export HOME="${PI_AGENT_DATA_DIR}/home"
+export PI_CODING_AGENT_DIR="${PI_AGENT_DATA_DIR}"
+export PI_TELEMETRY="${PI_TELEMETRY:-0}"
+export PI_SKIP_VERSION_CHECK="${PI_SKIP_VERSION_CHECK:-1}"
+
+exec /usr/local/bin/pi "$@"

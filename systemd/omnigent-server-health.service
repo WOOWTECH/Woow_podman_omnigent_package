@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh omnigent-server container health state
+After=omnigent-server.service
+Documentation=https://github.com/WOOWTECH/Woow_podman_omnigent_package
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/podman container exists omnigent-server
+ExecStart=/usr/bin/podman healthcheck run omnigent-server

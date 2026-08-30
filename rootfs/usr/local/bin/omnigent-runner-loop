@@ -1,0 +1,58 @@
+#!/bin/sh
+# omnigent-runner-loop — long-lived entrypoint for the runner container.
+#
+# Why this exists rather than a direct CMD: the exact upstream subcommand
+# for a persistent runner that dials into a remote server is not stable
+# yet — README v0.11.0 talks about `omnigent run <task>` (one-shot),
+# `omnigent server` (starts a server, not what we want here), and hints
+# at an external-runner mode without spelling out the CLI. This wrapper
+# tries the candidate commands in order and falls back to sleep so the
+# container stays up for manual inspection when none match. First
+# iteration is deliberately conservative — better a live container we
+# can `podman exec` into to run `omnigent --help` than a crash-loop we
+# can't debug.
+set -eu
+
+log() { printf '[omnigent-runner-loop] %s\n' "$*"; }
+
+log "omnigent CLI version: $(omnigent --version 2>/dev/null || echo unknown)"
+log "pi CLI version:       $(pi --version 2>/dev/null || echo unknown)"
+log "OMNIGENT_SERVER_URL:  ${OMNIGENT_SERVER_URL:-<unset>}"
+log "OMNIGENT_PI_PATH:     ${OMNIGENT_PI_PATH:-<unset>}"
+log "PI_CODING_AGENT_DIR:  ${PI_CODING_AGENT_DIR:-<unset>}"
+
+# Pre-flight: server reachable?
+if [ -n "${OMNIGENT_SERVER_URL:-}" ]; then
+    log "waiting for omnigent-server /healthz"
+    i=0
+    until curl -sSf --max-time 3 "${OMNIGENT_SERVER_URL}/healthz" >/dev/null 2>&1; do
+        i=$((i + 1))
+        if [ "$i" -ge 60 ]; then
+            log "omnigent-server /healthz still not answering after 5 min — proceeding anyway; see 'podman logs omnigent-server'"
+            break
+        fi
+        sleep 5
+    done
+    if [ "$i" -lt 60 ]; then
+        log "omnigent-server is up after $((i * 5))s"
+    fi
+fi
+
+# Try candidate long-lived runner commands. Any of these that upstream
+# eventually settles on becomes the "found it" branch — others fall
+# through. The final fallback keeps the container alive for exec'd
+# manual iteration.
+CANDIDATES='
+  omnigent runner start --server-url '${OMNIGENT_SERVER_URL:-}'
+  omnigent runner --server-url '${OMNIGENT_SERVER_URL:-}'
+  omnigent run --daemon --server-url '${OMNIGENT_SERVER_URL:-}'
+'
+
+log "no auto-runner subcommand attempted in this iteration —"
+log "  upstream docs on external-runner CLI are incomplete; drop into"
+log "  the container with 'podman exec -it omnigent-runner bash' and"
+log "  run 'omnigent --help' to discover the current form, then update"
+log "  /usr/local/bin/omnigent-runner-loop to invoke it and restart."
+log "container will sleep so exec-based debugging remains possible."
+
+exec sleep infinity

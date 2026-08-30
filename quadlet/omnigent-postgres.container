@@ -1,0 +1,45 @@
+# omnigent-postgres — PostgreSQL 16 backing store for the omnigent server.
+#
+# Not published to any host port. Only omnigent-server (on the same
+# omnigent podman network) needs to reach it, and going through the
+# rootless network keeps the db off the LAN.
+[Unit]
+Description=omnigent-postgres — PostgreSQL 16 for Omnigent
+Documentation=https://github.com/WOOWTECH/Woow_podman_omnigent_package
+After=network-online.target podman.socket
+Wants=network-online.target
+Requires=podman.socket
+
+[Container]
+ContainerName=omnigent-postgres
+Image=docker.io/library/postgres:16-alpine
+
+Network=omnigent.network
+Volume=omnigent-postgres-data:/var/lib/postgresql/data
+
+# Credentials — internal-only (never published to host). Baked to match
+# the container-level trust model of the sibling packages (code-server
+# PASSWORD, pi-web htpasswd bootstrap): the db lives inside the private
+# omnigent network, unreachable from LAN, so an internal-only password
+# is proportionate. If you want to rotate, edit here and restart the
+# service; the omnigent-server unit reads the matching value from its
+# own DATABASE_URL environment below.
+Environment=POSTGRES_DB=omnigent
+Environment=POSTGRES_USER=omnigent
+Environment=POSTGRES_PASSWORD=woowtech
+
+# Built-in healthcheck; omnigent-server depends on this reporting
+# healthy before it will start (see omnigent-server.container).
+HealthCmd=pg_isready -U omnigent -d omnigent
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=5
+
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

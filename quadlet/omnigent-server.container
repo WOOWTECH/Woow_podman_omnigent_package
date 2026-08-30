@@ -1,0 +1,78 @@
+# omnigent-server — the Omnigent orchestration server + web UI.
+#
+# Runs the upstream image from ghcr with no local build. Depends on
+# omnigent-postgres.service being healthy first (systemd Requires+After +
+# an application-level pg_isready loop upstream's entrypoint does).
+#
+# Publishes to 127.0.0.1:8000 only — the outward-facing entry is a
+# tailscale serve --https=9444 forwarder into this loopback port, which
+# gives the web UI a real Let's Encrypt cert on the tailnet MagicDNS
+# name (same pattern code-server uses for its chat webview to render).
+# Never widen this to 0.0.0.0 without either bootstrapping the admin
+# account first or setting OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD — the
+# first visitor to /auth/setup owns the instance.
+[Unit]
+Description=omnigent-server — Omnigent orchestration server + web UI
+Documentation=https://github.com/WOOWTECH/Woow_podman_omnigent_package
+After=network-online.target podman.socket omnigent-postgres.service
+Wants=network-online.target
+Requires=podman.socket omnigent-postgres.service
+
+[Container]
+ContainerName=omnigent-server
+# Pinned to latest for the initial deployment. Bump the tag here (and the
+# CHANGELOG) to a sha-<short> or vX.Y.Z once we validate a release; the
+# comment in docker-compose.yaml upstream explicitly supports both.
+Image=ghcr.io/omnigent-ai/omnigent-server:latest
+
+Network=omnigent.network
+
+# Loopback publish. Reach it through tailscale serve --https=9444 or
+# through the podman network (from omnigent-runner etc).
+PublishPort=127.0.0.1:8000:8000
+
+Volume=omnigent-server-data:/data
+
+# Database — the omnigent-postgres service name is what aardvark-dns
+# resolves inside this podman network.
+Environment=DATABASE_URL=postgresql+psycopg://omnigent:woowtech@omnigent-postgres:5432/omnigent
+
+# Bind + port. Upstream image reads these; PORT stays 8000 to match
+# PublishPort and the tailscale serve target.
+Environment=HOST=0.0.0.0
+Environment=PORT=8000
+
+# Persistent data lives on the omnigent-server-data volume. The admin
+# roster + allowed-domains file land here so first-boot admin creation
+# survives container restarts. Account rows and password hashes live in
+# Postgres (postgres-data volume), not here.
+Environment=ARTIFACT_DIR=/data/artifacts
+Environment=OMNIGENT_ADMIN_CREDENTIALS_PATH=/data/admin-credentials
+
+# Auth — leaving OMNIGENT_AUTH_ENABLED=1 (upstream default) selects the
+# built-in accounts flow (username + password). First boot logs a
+# "No admin yet" line pointing at the base URL; open that URL in a
+# browser and create the first admin. To pre-seed the password so no
+# race window exists, uncomment OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD
+# below and edit before enabling the service.
+Environment=OMNIGENT_AUTH_ENABLED=1
+# Environment=OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD=change-me-before-first-boot
+
+# Base URL — needed for any deploy behind a public/tailnet domain so
+# account invite emails and OAuth redirects resolve correctly.
+Environment=OMNIGENT_ACCOUNTS_BASE_URL=https://woow-openclaw-services-1.tailb7a69b.ts.net:9444
+
+HealthCmd=curl -sf http://127.0.0.1:8000/healthz || exit 1
+HealthInterval=30s
+HealthTimeout=10s
+HealthStartPeriod=30s
+HealthRetries=3
+
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

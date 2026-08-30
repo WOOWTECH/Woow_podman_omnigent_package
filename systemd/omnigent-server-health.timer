@@ -1,0 +1,12 @@
+[Unit]
+Description=Run omnigent-server health check every 30 seconds
+Documentation=https://github.com/WOOWTECH/Woow_podman_omnigent_package
+
+[Timer]
+OnActiveSec=120s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=omnigent-server-health.service
+
+[Install]
+WantedBy=timers.target

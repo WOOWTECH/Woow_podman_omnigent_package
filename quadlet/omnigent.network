@@ -1,0 +1,7 @@
+# omnigent.network — private bridge shared by omnigent-postgres,
+# omnigent-server, and omnigent-runner. Own network (not the default) so
+# containers can address each other by name (podman aardvark-dns) without
+# leaking DNS into the other stacks (pi-web, OD, code-server) that share
+# the same host. Nothing here needs a subnet override.
+[Network]
+NetworkName=omnigent

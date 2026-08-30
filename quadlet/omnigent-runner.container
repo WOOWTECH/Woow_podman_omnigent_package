@@ -1,0 +1,68 @@
+# omnigent-runner — always-on runner sidecar that dials into omnigent-server
+# over the omnigent podman network and exposes pi as an available harness.
+#
+# The runner is what actually spawns pi (or any other agent CLI); the
+# server is just orchestration. Bundling one here means the operator does
+# NOT need to run `omnigent run` on their own laptop before the web UI
+# becomes useful — a pi harness is available the moment omnigent-server
+# comes up.
+#
+# UserNS keep-id + shared pi-agent-data volume + OMNIGENT_PI_PATH pointing
+# at the /usr/local/bin/pi-code wrapper together give this runner the
+# same view of provider tokens / sessions / skills that pi-web, OD, and
+# code-server share on this host. A pi conversation started in the
+# omnigent web UI can be resumed inside code-server's ACP chat panel and
+# vice versa.
+#
+# NB: the exact command upstream expects for a long-lived runner is not
+# fully documented in the README (which pushes `omnigent run <task>`, a
+# one-shot form). This unit uses a start script that discovers the right
+# subcommand at runtime — see rootfs/usr/local/bin/omnigent-runner-loop.
+[Unit]
+Description=omnigent-runner — always-on pi harness runner for Omnigent
+Documentation=https://github.com/WOOWTECH/Woow_podman_omnigent_package
+After=network-online.target podman.socket omnigent-server.service
+Wants=network-online.target
+Requires=podman.socket omnigent-server.service
+
+[Container]
+ContainerName=omnigent-runner
+Image=localhost/woow-omnigent-runner:latest
+
+Pull=never
+AutoUpdate=local
+
+Network=omnigent.network
+
+# UserNS keep-id so the container's uid 1000 maps to the host's uid 1000
+# — otherwise the pi-agent-data volume (owned by woowtechopenclaw on the
+# host) reads back as owned by an unmapped subuid inside the container
+# and pi-code fails to open its session lock file. Same trick as
+# code-server's quadlet.
+UserNS=keep-id:uid=1000,gid=1000
+
+# Shared pi state. External volume — owned by Woow_podman_pi_agent_package.
+Volume=pi-agent-data:/data/pi-agent
+
+# Where omnigent-server lives from the runner's perspective. Aardvark-dns
+# on the omnigent network resolves the container name.
+Environment=OMNIGENT_SERVER_URL=http://omnigent-server:8000
+
+# The one env that steers pi spawning. Setting it here means every pi
+# subprocess the runner launches runs under our HOME-rescoping wrapper,
+# so its sessions/skills/models land on pi-agent-data.
+Environment=OMNIGENT_PI_PATH=/usr/local/bin/pi-code
+
+# pi's own housekeeping.
+Environment=PI_CODING_AGENT_DIR=/data/pi-agent
+Environment=PI_TELEMETRY=0
+Environment=PI_SKIP_VERSION_CHECK=1
+
+NoNewPrivileges=true
+
+[Service]
+Restart=always
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

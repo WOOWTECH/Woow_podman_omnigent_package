@@ -1,0 +1,88 @@
+# Woow Omnigent runner — always-on sidecar that dials into omnigent-server
+# and offers the `pi` harness to any session started from the web UI.
+#
+# What lives in here:
+#   - Python 3.12 + pip install omnigent (upstream v0.11.0)
+#   - Node 22 + @earendil-works/pi-coding-agent (pi CLI, same 0.83.0 pin
+#     the code-server / OD / pi-web deployments use — the pi-agent-data
+#     volume schema must agree across all four consumers)
+#   - /usr/local/bin/pi-code — the HOME-rescoping wrapper (byte-identical
+#     to the one code-server ships; kept in rootfs/ here for review, not
+#     symlinked out of another repo, so this image is self-contained)
+#   - /usr/local/bin/omnigent-runner-loop — discovers the right upstream
+#     subcommand for a long-lived runner and stays in the foreground so
+#     systemd sees a real process to supervise
+
+ARG OMNIGENT_VERSION=0.11.0
+ARG PI_CODING_AGENT_VERSION=0.83.0
+
+FROM docker.io/library/debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TZ=Asia/Taipei \
+    PI_TELEMETRY=0 \
+    PI_SKIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+# --- System packages -----------------------------------------------------
+# Python 3, Node 22 (pi needs >=22), git + openssh-client for the harness
+# to clone/push, curl+jq for the runner-loop discovery, tini for a proper
+# PID 1 that reaps zombies.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl git gnupg jq openssh-client \
+      python3 python3-pip python3-venv \
+      tini tzdata \
+ && mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# --- pi CLI --------------------------------------------------------------
+# Same version the sibling deployments pin (pi-web 0.13.2, code-server
+# package v1, OD Dockerfile.full). Bump this and the sibling packages
+# together — the pi-agent-data on-disk schema is not versioned.
+RUN npm install -g --omit=dev --no-fund --no-audit \
+      "@earendil-works/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
+ && test "$(pi --version)" = "${PI_CODING_AGENT_VERSION}"
+
+# --- omnigent runtime ----------------------------------------------------
+# Debian 12's system python is old but adequate for pip-installing pure
+# Python packages. omnigent has C extension deps (psycopg 3 is one) that
+# ship prebuilt wheels for cp312 manylinux — no compiler needed in the
+# image. --break-system-packages because Debian 12 marks system python
+# as PEP 668 externally-managed; the alternative (per-user venv) hides
+# the `omnigent` entry point from the tini-launched command below.
+RUN pip3 install --no-cache-dir --break-system-packages \
+      "omnigent==${OMNIGENT_VERSION}" \
+ && omnigent --version
+
+# --- Rootfs overlay ------------------------------------------------------
+#   /usr/local/bin/pi-code               — HOME rescoping wrapper
+#   /usr/local/bin/omnigent-runner-loop  — long-lived runner entrypoint
+COPY rootfs/ /
+RUN chmod +x /usr/local/bin/pi-code /usr/local/bin/omnigent-runner-loop
+
+# The upstream image runs as root; we mirror that here because the
+# omnigent CLI writes to $HOME/.omnigent/ and rootless podman with
+# UserNS=keep-id maps container root back to the invoking host user.
+# ENTRYPOINT tini so signals + child reaping are sane.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/omnigent-runner-loop"]
+
+ARG BUILD_VERSION=dev
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="Woow Podman Omnigent Runner" \
+      org.opencontainers.image.description="Omnigent always-on runner sidecar with pi CLI + pi-code wrapper wired to shared pi-agent-data" \
+      org.opencontainers.image.source="https://github.com/WOOWTECH/Woow_podman_omnigent_package" \
+      org.opencontainers.image.vendor="WOOWTECH" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
