@@ -13,10 +13,18 @@
 #     subcommand for a long-lived runner and stays in the foreground so
 #     systemd sees a real process to supervise
 
+# python:3.12-slim gives us Python 3.12 out of the box — omnigent requires
+# >=3.12 and Debian 12 bookworm-slim ships 3.11 (found the hard way in
+# the first build attempt). The image is still Debian-based so
+# apt-get / nodesource / npm all behave the same as bookworm-slim.
+FROM docker.io/library/python:3.12-slim
+
+# ARGs declared BEFORE FROM only apply to that FROM line. Re-declare here
+# so the RUN steps below actually see the pinned versions instead of an
+# empty string that silently degrades to `pip install omnigent==` (any)
+# and `npm install @earendil-works/pi-coding-agent@` (latest).
 ARG OMNIGENT_VERSION=0.11.0
 ARG PI_CODING_AGENT_VERSION=0.83.0
-
-FROM docker.io/library/debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -27,13 +35,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_ROOT_USER_ACTION=ignore
 
 # --- System packages -----------------------------------------------------
-# Python 3, Node 22 (pi needs >=22), git + openssh-client for the harness
-# to clone/push, curl+jq for the runner-loop discovery, tini for a proper
-# PID 1 that reaps zombies.
+# Node 22 (pi needs >=22), git + openssh-client for the harness to clone
+# and push, curl+jq for the runner-loop discovery, tini for a proper PID
+# 1 that reaps zombies. Python 3.12 comes from the base image.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git gnupg jq openssh-client \
-      python3 python3-pip python3-venv \
       tini tzdata \
  && mkdir -p /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -58,13 +65,12 @@ RUN npm install -g --omit=dev --no-fund --no-audit \
  && pi --version 2>&1 | head -1 | grep -qF "${PI_CODING_AGENT_VERSION}"
 
 # --- omnigent runtime ----------------------------------------------------
-# Debian 12's system python is old but adequate for pip-installing pure
-# Python packages. omnigent has C extension deps (psycopg 3 is one) that
-# ship prebuilt wheels for cp312 manylinux — no compiler needed in the
-# image. --break-system-packages because Debian 12 marks system python
-# as PEP 668 externally-managed; the alternative (per-user venv) hides
-# the `omnigent` entry point from the tini-launched command below.
-RUN pip3 install --no-cache-dir --break-system-packages \
+# python:3.12-slim's python is not PEP 668-managed the way Debian's is,
+# so a plain global install works and the `omnigent` entry point lands
+# on PATH for the tini-launched command below. omnigent's C extension
+# deps (psycopg 3, etc) all ship prebuilt cp312 manylinux wheels — no
+# compiler needed in the image.
+RUN pip3 install --no-cache-dir \
       "omnigent==${OMNIGENT_VERSION}" \
  && omnigent --version
 
