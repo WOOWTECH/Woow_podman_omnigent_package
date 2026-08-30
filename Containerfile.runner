@@ -56,7 +56,7 @@ RUN mkdir -p /omnigent-home && chmod 777 /omnigent-home
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git gnupg jq openssh-client \
-      tini tzdata \
+      tini tmux tzdata \
  && mkdir -p /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
