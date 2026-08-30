@@ -60,9 +60,18 @@ cd Woow_podman_omnigent_package
 ```
 
 啟動順序：`omnigent-postgres` → `omnigent-server` → `omnigent-runner`。
-install.sh 會等 server 回應 `/health`（JSON `{"status":"ok"}`）才收工。
+install.sh 會等 server 回應 `/health`（JSON `{"status":"ok"}`）才收工，
+接著**自動 claim 第一個 admin**：讀 `quadlet/omnigent-runner.container`
+裡的 `OMNIGENT_ADMIN_{USERNAME,PASSWORD}` POST 給 `/auth/setup`，不用手動
+開 `/setup` 表單，runner container 起來後 curl `/auth/login` 就打得中。
+若 admin 已存在會收 409 靜默略過。
+
 **不要**把 `/healthz` 當 liveness probe — React SPA catch-all 把 `/healthz`
 變成回 `index.html` HTTP 200，即使 API 死了 probe 也永遠綠燈。
+
+**部署到信任邊界以外前先改預設密碼** — 預設值放在
+`quadlet/omnigent-runner.container`，同時是 runner 撥回登入用的憑證跟
+人類 admin 帳號的 single source of truth。
 
 跳過 runner image 重 build：`OD_SKIP_BUILD=1 ./scripts/install.sh`。
 

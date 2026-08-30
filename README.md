@@ -70,9 +70,21 @@ cd Woow_podman_omnigent_package
 
 Startup order: `omnigent-postgres` → `omnigent-server` → `omnigent-runner`.
 The install script waits for the server to answer `/health` (JSON
-`{"status":"ok"}`) before returning. **Do not swap `/healthz` in as a
-liveness probe** — the React SPA catch-all serves `index.html` for that
-path with HTTP 200 even when the API is dead, so probes never fail.
+`{"status":"ok"}`) before returning, then **auto-claims the first admin**
+via `POST /auth/setup` using the `OMNIGENT_ADMIN_{USERNAME,PASSWORD}`
+env in `quadlet/omnigent-runner.container` — no manual `/setup` form
+click, and the runner container's later `/auth/login` lands on a db
+that already has that admin. On a system where admin already exists
+the setup POST returns 409 and is silently skipped.
+
+**Do not swap `/healthz` in as a liveness probe** — the React SPA
+catch-all serves `index.html` for that path with HTTP 200 even when
+the API is dead, so probes never fail.
+
+**Change the default admin credentials** before publishing this stack
+to anyone outside the trust boundary — the defaults live in
+`quadlet/omnigent-runner.container` and are the single source of truth
+for both the runner's dial-in login and the human admin.
 
 Skip the runner image rebuild with `OD_SKIP_BUILD=1 ./scripts/install.sh`.
 

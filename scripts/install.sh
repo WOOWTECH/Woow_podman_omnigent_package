@@ -77,6 +77,40 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
+# --- Auto-claim admin on first boot ------------------------------------------
+# Upstream server ships needs_setup=true until POST /auth/setup mints the first
+# admin. We read the same OMNIGENT_ADMIN_{USERNAME,PASSWORD} that the runner
+# quadlet uses, so the runner-loop's later curl POST /auth/login lands in a
+# db that already has that admin — no manual /setup form click. On a system
+# where admin already exists this is a no-op (server returns 409, we ignore).
+if curl -sSf -o /dev/null http://127.0.0.1:8000/health 2>/dev/null; then
+    NEEDS="$(curl -sS --max-time 5 http://127.0.0.1:8000/v1/info | jq -r '.needs_setup // false' 2>/dev/null || echo unknown)"
+    if [ "${NEEDS}" = "true" ]; then
+        say "First boot detected (needs_setup=true) — auto-claiming admin"
+        # Pull the runner's admin creds — single source of truth.
+        RUNNER_UNIT="${REPO_DIR}/quadlet/omnigent-runner.container"
+        ADMIN_USER="$(sed -n 's/^Environment=OMNIGENT_ADMIN_USERNAME=//p' "${RUNNER_UNIT}" | head -1)"
+        ADMIN_PW="$(  sed -n 's/^Environment=OMNIGENT_ADMIN_PASSWORD=//p' "${RUNNER_UNIT}" | head -1)"
+        if [ -z "${ADMIN_USER}" ] || [ -z "${ADMIN_PW}" ]; then
+            warn "OMNIGENT_ADMIN_{USERNAME,PASSWORD} not found in quadlet/omnigent-runner.container"
+            warn "Open the base URL and create the first admin manually."
+        else
+            CODE="$(curl -sS -o /tmp/omnigent-setup.$$ -w '%{http_code}' \
+                -X POST -H 'Content-Type: application/json' \
+                --data "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PW}\"}" \
+                --max-time 10 http://127.0.0.1:8000/auth/setup 2>&1)"
+            case "${CODE}" in
+                200|201) say "  admin '${ADMIN_USER}' created" ;;
+                409)     say "  admin already exists — skipping" ;;
+                *)       warn "  /auth/setup returned ${CODE} — response: $(cat /tmp/omnigent-setup.$$ 2>/dev/null | head -c 200)" ;;
+            esac
+            rm -f /tmp/omnigent-setup.$$
+        fi
+    else
+        say "Admin already claimed (needs_setup=${NEEDS}) — skipping auto-setup"
+    fi
+fi
+
 cat <<EOF
 
 $(say "Done")
@@ -90,10 +124,10 @@ $(say "Done")
   Stop            systemctl --user stop omnigent-runner omnigent-server omnigent-postgres
   Status          podman ps --format '{{.Names}}\t{{.Status}}'
 
-  First boot: watch 'podman logs omnigent-server' for a "No admin yet" line,
-  open the base URL, and create the first admin (username + password) via
-  the Create-admin form. Or pre-seed by editing OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD
-  in ~/.config/containers/systemd/omnigent-server.container before starting.
+  Admin login: the credentials in quadlet/omnigent-runner.container
+    (OMNIGENT_ADMIN_USERNAME / OMNIGENT_ADMIN_PASSWORD) are auto-claimed on
+    first boot via POST /auth/setup. Change them before deployment if you
+    care — anyone with clone access can read the defaults.
 
   For tailnet access with a real (browser-trusted) HTTPS cert, add:
       podman exec woow-tailscale-gateway \\
