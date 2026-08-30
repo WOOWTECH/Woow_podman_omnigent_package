@@ -57,10 +57,10 @@ test("home page shows 'What should we build?' and composer", async ({
   await expect(page.getByText(/what should we build/i)).toBeVisible({
     timeout: 20_000,
   });
-  // Composer textbox — accept either an explicit "Message" label or the
-  // generic prompt placeholder Omnigent 0.11.0 ships with.
+  // Composer textbox — Omnigent 0.11.0 uses "Describe a task…" as the
+  // composer placeholder; older builds used "Message".
   const composer = page
-    .getByRole("textbox", { name: /message|prompt|what should we build/i })
+    .getByRole("textbox", { name: /describe a task|message|prompt/i })
     .first();
   await expect(composer).toBeVisible();
 });

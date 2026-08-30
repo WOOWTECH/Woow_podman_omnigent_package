@@ -20,7 +20,7 @@ test.describe.serial("chat", () => {
       .click();
 
     const composer = page
-      .getByRole("textbox", { name: /message|prompt|what should we build/i })
+      .getByRole("textbox", { name: /describe a task|message|prompt/i })
       .first();
     await expect(composer).toBeVisible();
     await composer.fill(prompt);

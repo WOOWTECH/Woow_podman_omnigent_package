@@ -40,9 +40,8 @@ test.describe("settings", () => {
     await page.goto("/settings/shortcuts");
     const row = page.getByText(/start a new session/i).first();
     await expect(row).toBeVisible();
-    // The keybinding is rendered adjacent to the label; assert both are present
-    // somewhere on the page rather than couple to DOM layout.
-    await expect(page.getByText(/ctrl\s*\+\s*n/i).first()).toBeVisible();
+    // Keybinding tokens render as separate spans "Ctrl" + "N" (no literal +).
+    await expect(page.getByText(/ctrl\s*\+?\s*n\b/i).first()).toBeVisible();
   });
 
   test("settings/members shows woow admin row and Invite member button", async ({
@@ -76,9 +75,11 @@ test.describe("settings", () => {
     await addBtn.click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
-    // Registry is a list of ~26 policy entries; assert at least 20 to leave
-    // room for minor catalog changes without lying about the count.
-    const entries = dialog.getByRole("option").or(dialog.getByRole("listitem"));
+    // Registry entries render as role=button (each policy is a clickable
+    // card). Filter out the modal action buttons (Cancel/Add/Close).
+    const entries = dialog.getByRole("button").filter({
+      hasNotText: /^(cancel|add|close)$/i,
+    });
     await expect(entries.first()).toBeVisible();
     expect(await entries.count()).toBeGreaterThanOrEqual(20);
   });
@@ -87,7 +88,10 @@ test.describe("settings", () => {
     page,
   }) => {
     await page.goto("/settings/sharing");
-    for (const name of [/^on$/i, /^read only$/i, /read only restricted/i, /^off$/i]) {
+    // Radio accessible-names include the full description, e.g.
+    //   "On Anyone with manage access can share…"
+    // so drop the ^…$ anchors and match the leading token + whitespace.
+    for (const name of [/^on\s/i, /^read only\s/i, /read only \(restricted\)/i, /^off\s/i]) {
       await expect(page.getByRole("radio", { name })).toBeVisible();
     }
   });
@@ -96,8 +100,10 @@ test.describe("settings", () => {
     page,
   }) => {
     await page.goto("/settings/archived");
+    // Sidebar has h2 "Archived" AND main has h1 "Archived sessions" — must
+    // disambiguate or strict-mode fails.
     await expect(
-      page.getByRole("heading", { name: /archived/i }),
+      page.getByRole("heading", { name: /archived sessions/i }),
     ).toBeVisible();
     // Sidebar nav should still be present on the settings shell.
     await expect(

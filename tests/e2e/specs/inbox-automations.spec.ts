@@ -13,7 +13,8 @@ test.describe("automations", () => {
   test("automations: 'New task' opens modal with Name / Prompt / Runs with / Model / Frequency / Time fields", async ({
     page,
   }) => {
-    await page.goto("/automations");
+    // Route note: sidebar link labeled "Automations" points at `/tasks`.
+    await page.goto("/tasks");
     await page.getByRole("button", { name: /new task/i }).click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
@@ -28,7 +29,8 @@ test.describe("automations", () => {
   test("automations: Cancel closes modal without creating a task", async ({
     page,
   }) => {
-    await page.goto("/automations");
+    // Route note: sidebar link labeled "Automations" points at `/tasks`.
+    await page.goto("/tasks");
     const rowsBefore = await page.getByRole("row").count();
     await page.getByRole("button", { name: /new task/i }).click();
     const dialog = page.getByRole("dialog");
