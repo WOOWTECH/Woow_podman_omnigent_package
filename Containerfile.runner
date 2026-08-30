@@ -32,7 +32,22 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Taipei \
     PI_TELEMETRY=0 \
     PI_SKIP_VERSION_CHECK=1 \
-    PIP_ROOT_USER_ACTION=ignore
+    PIP_ROOT_USER_ACTION=ignore \
+    HOME=/omnigent-home
+
+# --- Writable HOME for omnigent ------------------------------------------
+# omnigent CLI wants $HOME/.omnigent/{logs,config,...} — its first act on
+# any invocation is `log_dir.mkdir(parents=True)` which fails hard with
+# PermissionError if HOME=/ (the default when neither the image nor the
+# quadlet sets it explicitly). python:3.12-slim doesn't ship /root as
+# writable to the process's effective uid under rootless podman's
+# UserNS=keep-id mapping either, so we create a dedicated dir and set
+# HOME to it — cheap and always writable regardless of userns.
+#
+# pi-code's own HOME rescoping is per-invocation (it exports HOME=
+# /data/pi-agent/home just before exec'ing pi); this container-level
+# HOME only governs omnigent's own state, not any pi subprocess it spawns.
+RUN mkdir -p /omnigent-home && chmod 777 /omnigent-home
 
 # --- System packages -----------------------------------------------------
 # Node 22 (pi needs >=22), git + openssh-client for the harness to clone
