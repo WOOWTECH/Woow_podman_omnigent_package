@@ -48,6 +48,17 @@ Volume=pi-agent-data:/data/pi-agent
 # on the omnigent network resolves the container name.
 Environment=OMNIGENT_SERVER_URL=http://omnigent-server:8000
 
+# Admin credentials for the runner-loop to auto-login + auto-register as
+# a host on every container start. The runner container's rootfs is
+# ephemeral (no volume mounted at $HOME/.omnigent), so auth_tokens.json
+# is lost on every restart — we re-create it from these credentials.
+# Match whatever admin account you created on first-boot via the web UI
+# (or pre-seeded with OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD on the
+# server side). Same trust model as POSTGRES_PASSWORD: container-only,
+# never published to LAN.
+Environment=OMNIGENT_ADMIN_USERNAME=woow
+Environment=OMNIGENT_ADMIN_PASSWORD=woowtech2026
+
 # The one env that steers pi spawning. Setting it here means every pi
 # subprocess the runner launches runs under our HOME-rescoping wrapper,
 # so its sessions/skills/models land on pi-agent-data.

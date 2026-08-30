@@ -1,58 +1,98 @@
 #!/bin/sh
 # omnigent-runner-loop — long-lived entrypoint for the runner container.
 #
-# Why this exists rather than a direct CMD: the exact upstream subcommand
-# for a persistent runner that dials into a remote server is not stable
-# yet — README v0.11.0 talks about `omnigent run <task>` (one-shot),
-# `omnigent server` (starts a server, not what we want here), and hints
-# at an external-runner mode without spelling out the CLI. This wrapper
-# tries the candidate commands in order and falls back to sleep so the
-# container stays up for manual inspection when none match. First
-# iteration is deliberately conservative — better a live container we
-# can `podman exec` into to run `omnigent --help` than a crash-loop we
-# can't debug.
+# Boot sequence:
+#   1. Wait for omnigent-server /healthz.
+#   2. If ~/.omnigent/auth_tokens.json is missing (fresh container FS,
+#      since $HOME is baked into the image, not a volume), POST
+#      /auth/login with OMNIGENT_ADMIN_{USERNAME,PASSWORD} and write the
+#      JWT in the exact shape omnigent CLI expects — keyed by the
+#      server URL, containing `token`, `user_id`, `expires_at`.
+#   3. Kick off `omnigent host --background --non-interactive` — the
+#      host daemon dials in, registers this container as a host with
+#      the server, and stays up in its own process.
+#   4. `exec tail -F` the host daemon's log so podman/systemd sees a
+#      live foreground process to supervise, and the log surfaces in
+#      `podman logs -f omnigent-runner`.
+#
+# On a container restart this whole thing runs again — auth_tokens.json
+# is missing (ephemeral FS), we re-login with the same credentials,
+# re-register with a fresh host_id, done. The old host_id in the server
+# DB is left orphan (offline), which is the same shape you'd get if a
+# user's laptop went to sleep — server tolerates it fine.
 set -eu
 
 log() { printf '[omnigent-runner-loop] %s\n' "$*"; }
 
-log "omnigent CLI version: $(omnigent --version 2>/dev/null || echo unknown)"
-log "pi CLI version:       $(pi --version 2>/dev/null || echo unknown)"
-log "OMNIGENT_SERVER_URL:  ${OMNIGENT_SERVER_URL:-<unset>}"
-log "OMNIGENT_PI_PATH:     ${OMNIGENT_PI_PATH:-<unset>}"
-log "PI_CODING_AGENT_DIR:  ${PI_CODING_AGENT_DIR:-<unset>}"
+log "omnigent CLI: $(omnigent --version 2>/dev/null || echo unknown)"
+log "pi CLI:       $(pi --version 2>/dev/null || echo unknown)"
+log "server URL:   ${OMNIGENT_SERVER_URL:-<unset>}"
+log "admin user:   ${OMNIGENT_ADMIN_USERNAME:-<unset>}"
+log "PI wrapper:   ${OMNIGENT_PI_PATH:-<unset>}"
 
-# Pre-flight: server reachable?
+# --- 1. Wait for server -------------------------------------------------
 if [ -n "${OMNIGENT_SERVER_URL:-}" ]; then
     log "waiting for omnigent-server /healthz"
     i=0
     until curl -sSf --max-time 3 "${OMNIGENT_SERVER_URL}/healthz" >/dev/null 2>&1; do
         i=$((i + 1))
         if [ "$i" -ge 60 ]; then
-            log "omnigent-server /healthz still not answering after 5 min — proceeding anyway; see 'podman logs omnigent-server'"
-            break
+            log "omnigent-server /healthz not answering after 5 min — bailing to sleep-forever"
+            exec sleep infinity
         fi
         sleep 5
     done
-    if [ "$i" -lt 60 ]; then
-        log "omnigent-server is up after $((i * 5))s"
-    fi
+    log "server up after $((i * 5))s"
 fi
 
-# Try candidate long-lived runner commands. Any of these that upstream
-# eventually settles on becomes the "found it" branch — others fall
-# through. The final fallback keeps the container alive for exec'd
-# manual iteration.
-CANDIDATES='
-  omnigent runner start --server-url '${OMNIGENT_SERVER_URL:-}'
-  omnigent runner --server-url '${OMNIGENT_SERVER_URL:-}'
-  omnigent run --daemon --server-url '${OMNIGENT_SERVER_URL:-}'
-'
+# --- 2. Auto-login + write auth_tokens.json ----------------------------
+AUTH_DIR="${HOME}/.omnigent"
+AUTH_FILE="${AUTH_DIR}/auth_tokens.json"
+if [ -s "${AUTH_FILE}" ]; then
+    log "auth_tokens.json already present — skipping login"
+else
+    if [ -z "${OMNIGENT_ADMIN_USERNAME:-}" ] || [ -z "${OMNIGENT_ADMIN_PASSWORD:-}" ]; then
+        log "OMNIGENT_ADMIN_{USERNAME,PASSWORD} unset — cannot auto-register"
+        log "podman exec into the container and follow the manual login steps"
+        exec sleep infinity
+    fi
+    log "logging in as ${OMNIGENT_ADMIN_USERNAME} to ${OMNIGENT_SERVER_URL}"
+    RESP=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        --data-binary "{\"username\":\"${OMNIGENT_ADMIN_USERNAME}\",\"password\":\"${OMNIGENT_ADMIN_PASSWORD}\"}" \
+        --max-time 10 "${OMNIGENT_SERVER_URL}/auth/login" 2>&1)
+    TOKEN=$(printf '%s' "${RESP}" | jq -r .token 2>/dev/null || echo null)
+    if [ -z "${TOKEN}" ] || [ "${TOKEN}" = "null" ]; then
+        log "login failed. Server response: ${RESP}"
+        log "check OMNIGENT_ADMIN_PASSWORD matches the admin account created via the web UI"
+        exec sleep infinity
+    fi
+    EXPIRES_IN=$(printf '%s' "${RESP}" | jq -r .expires_in)
+    NOW=$(date +%s)
+    EXPIRES_AT="$((NOW + EXPIRES_IN)).0"
+    mkdir -p "${AUTH_DIR}"
+    jq -n --arg url "${OMNIGENT_SERVER_URL}" --arg tok "${TOKEN}" \
+          --arg uid "${OMNIGENT_ADMIN_USERNAME}" --argjson exp "${EXPIRES_AT}" \
+        '{ ($url): { token: $tok, user_id: $uid, expires_at: $exp } }' \
+        > "${AUTH_FILE}"
+    chmod 600 "${AUTH_FILE}"
+    log "auth_tokens.json written (JWT expires in ${EXPIRES_IN}s)"
+fi
 
-log "no auto-runner subcommand attempted in this iteration —"
-log "  upstream docs on external-runner CLI are incomplete; drop into"
-log "  the container with 'podman exec -it omnigent-runner bash' and"
-log "  run 'omnigent --help' to discover the current form, then update"
-log "  /usr/local/bin/omnigent-runner-loop to invoke it and restart."
-log "container will sleep so exec-based debugging remains possible."
+# --- 3. Register as host in the background -----------------------------
+log "registering as omnigent host"
+if ! omnigent host --background --non-interactive --server "${OMNIGENT_SERVER_URL}" 2>&1 | sed 's/^/[omnigent host] /'; then
+    log "omnigent host --background returned non-zero (may already be running)"
+fi
 
-exec sleep infinity
+# --- 4. Foreground: tail the host daemon log ---------------------------
+LOG_DIR="${HOME}/.omnigent/logs/host"
+log "waiting for host daemon log directory to appear"
+i=0
+until [ -n "$(ls -1 ${LOG_DIR}/*.log 2>/dev/null | head -1)" ]; do
+    i=$((i + 1))
+    [ "$i" -ge 30 ] && { log "no host log after 30s — falling back to sleep forever"; exec sleep infinity; }
+    sleep 1
+done
+LATEST=$(ls -t ${LOG_DIR}/*.log 2>/dev/null | head -1)
+log "tailing ${LATEST} in the foreground so podman/systemd sees a live process"
+exec tail -F "${LATEST}"
