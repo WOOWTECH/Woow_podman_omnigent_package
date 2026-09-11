@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Smoke: runner has pi 0.83.0, pi-code wrapper installed, /data/pi-agent
-# mounted with sibling artefacts visible, OMNIGENT_PI_PATH set right.
+# Smoke: the runner has the pinned pi, the pi-code wrapper is installed, /data/pi-agent is
+# mounted and OMNIGENT_PI_PATH points at the wrapper. The sibling-artefact checks only mean
+# something in OMNIGENT_PI_STATE=shared mode; in private mode they SKIP until someone has
+# run `podman exec -it omnigent-runner pi login`.
 set -uo pipefail
 
-EXPECTED_PI_VERSION="${EXPECTED_PI_VERSION:-0.83.0}"
+EXPECTED_PI_VERSION="${EXPECTED_PI_VERSION:-0.85.1}"
 PASS_N=0; FAIL_N=0
 ok()  { printf '  \033[32mPASS\033[0m  %s\n' "$*"; PASS_N=$((PASS_N+1)); }
 bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAIL_N=$((FAIL_N+1)); }
@@ -13,9 +15,11 @@ CX() { podman exec omnigent-runner "$@"; }
 
 echo "== Runner has pi CLI + wrapper =="
 if V="$(CX pi --version 2>&1)"; then
-    [ "${V}" = "${EXPECTED_PI_VERSION}" ] \
-        && ok "pi --version = ${V}" \
-        || bad "pi --version = ${V} (expected ${EXPECTED_PI_VERSION})"
+    if [ "${V}" = "${EXPECTED_PI_VERSION}" ]; then
+        ok "pi --version = ${V}"
+    else
+        bad "pi --version = ${V} (expected ${EXPECTED_PI_VERSION})"
+    fi
 else
     bad "pi not on PATH inside runner"
 fi
@@ -27,26 +31,28 @@ else
 fi
 
 echo
-echo "== Shared /data/pi-agent volume =="
+echo "== /data/pi-agent volume =="
 if CX test -d /data/pi-agent; then
     ok "/data/pi-agent mounted"
     for f in models-store.json home sessions; do
         if CX test -e "/data/pi-agent/${f}"; then
             ok "  sees sibling artefact /data/pi-agent/${f}"
         else
-            skip "  /data/pi-agent/${f} absent (sibling pi-web not deployed?)"
+            skip "  /data/pi-agent/${f} absent (private pi state, or no pi login yet)"
         fi
     done
 else
-    bad "/data/pi-agent NOT mounted — pi state won't persist / share"
+    bad "/data/pi-agent NOT mounted — pi state will not persist"
 fi
 
 echo
 echo "== OMNIGENT_PI_PATH steers spawns to pi-code =="
 V="$(CX printenv OMNIGENT_PI_PATH 2>&1 || true)"
-[ "${V}" = "/usr/local/bin/pi-code" ] \
-    && ok "OMNIGENT_PI_PATH=${V}" \
-    || bad "OMNIGENT_PI_PATH=${V} (expected /usr/local/bin/pi-code)"
+if [ "${V}" = "/usr/local/bin/pi-code" ]; then
+    ok "OMNIGENT_PI_PATH=${V}"
+else
+    bad "OMNIGENT_PI_PATH=${V} (expected /usr/local/bin/pi-code)"
+fi
 
 echo
 printf '  %d passed, %d failed\n\n' "${PASS_N}" "${FAIL_N}"

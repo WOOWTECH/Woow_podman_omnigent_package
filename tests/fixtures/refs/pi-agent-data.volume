@@ -1,0 +1,10 @@
+# Copy of Woow_podman_pi_agent_package's quadlet/pi-agent-data.volume (not installed by this
+# repo). tests/dryrun.sh uses it to resolve the shared-mode reference of omnigent-runner.
+[Unit]
+Description=pi-agent persistent data
+
+[Volume]
+VolumeName=pi-agent-data
+
+[Install]
+WantedBy=default.target
