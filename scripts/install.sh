@@ -222,7 +222,13 @@ case $needs in
       *) ql_die "POST /auth/setup returned HTTP $code; create the admin '$USER_NAME' in the web UI with the password from: podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password" ;;
     esac
     ;;
-  *) ql_die "cannot read needs_setup from $BASE/v1/info" ;;
+  *)
+    # Not fatal on its own: tests/smoke.sh below asserts needs_setup=false, so a stack that
+    # really has no admin still fails the install, with a clearer error than this one.
+    ql_warn "cannot read needs_setup from $BASE/v1/info (got: ${info:0:120})"
+    ql_warn "if the web UI asks you to create the first admin, use '$USER_NAME' with the password from:"
+    printf "    podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password\n" >&2
+    ;;
 esac
 
 # podman's transient health timers are not reliable for postgres (see the health service):
