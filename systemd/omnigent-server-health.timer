@@ -1,5 +1,5 @@
 [Unit]
-Description=Run omnigent-server health check every 30 seconds
+Description=Run omnigent health checks every 30 seconds
 Documentation=https://github.com/WOOWTECH/Woow_podman_omnigent_package
 
 [Timer]
