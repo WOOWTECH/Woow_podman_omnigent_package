@@ -1,7 +1,8 @@
-# Omnigent 0.11.0 Web UI — Playwright E2E
+# Omnigent Web UI — Playwright E2E
 
-Self-contained Playwright + TypeScript E2E suite for the Omnigent 0.11.0 Web UI
-served by the `Woow_podman_omnigent_package` runner.
+Self-contained Playwright + TypeScript E2E suite for the Omnigent Web UI served by the
+`Woow_podman_omnigent_package` deployment. It runs against a **real** deployment and carries
+no credentials of its own.
 
 ## Run
 
@@ -9,16 +10,22 @@ served by the `Woow_podman_omnigent_package` runner.
 cd tests/e2e
 npm ci
 npm run install-browsers
-OMNIGENT_BASE_URL=https://... OMNIGENT_ADMIN_PASSWORD=... npm test
+OMNIGENT_BASE_URL=http://127.0.0.1:8000 \
+OMNIGENT_ADMIN_PASSWORD="$(podman secret inspect --showsecret \
+    --format '{{.SecretData}}' omnigent-admin-password)" \
+  npm test
 ```
 
-Environment variables (all optional; defaults are for the woow-openclaw dev box):
+Environment variables:
 
-| var                        | default                                                                 |
-| -------------------------- | ----------------------------------------------------------------------- |
-| `OMNIGENT_BASE_URL`        | `https://woow-openclaw-services-1.tailb7a69b.ts.net:9444`               |
-| `OMNIGENT_ADMIN_USERNAME`  | `woow`                                                                  |
-| `OMNIGENT_ADMIN_PASSWORD`  | `woowtech2026`                                                          |
+| var                        | required | default |
+| -------------------------- | -------- | ------- |
+| `OMNIGENT_BASE_URL`        | yes      | —       |
+| `OMNIGENT_ADMIN_PASSWORD`  | yes      | —       |
+| `OMNIGENT_ADMIN_USERNAME`  | no       | `admin` (`OMNIGENT_ADMIN_USERNAME` in `~/.config/omnigent/omnigent.env`) |
+
+The password is the deployment's admin credential: pass it in from the podman secret as
+above, and do not paste it into a shell that records history.
 
 ## Suites
 
@@ -44,4 +51,5 @@ Environment variables (all optional; defaults are for the woow-openclaw dev box)
 These tests were generated from a chrome-devtools MCP walk on **2026-08-31** against
 Omnigent **0.11.0** + our runner (pi-native harness) and validated against session
 `0a262a34423647e88330a41377f2a78f` (test prompt `e2e-ultracode-2026`, pi replied via
-GPT-5.6 Sol).
+GPT-5.6 Sol). The deployment now pins server **v0.12.0**; a few selectors may need a
+refresh on the next run.

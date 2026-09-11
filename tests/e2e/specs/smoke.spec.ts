@@ -5,8 +5,17 @@ import { test, expect } from "@playwright/test";
  * (health endpoints, login page render).
  */
 
-const USERNAME = process.env.OMNIGENT_ADMIN_USERNAME ?? "woow";
-const PASSWORD = process.env.OMNIGENT_ADMIN_PASSWORD ?? "woowtech2026";
+const USERNAME = process.env.OMNIGENT_ADMIN_USERNAME ?? "admin";
+const PASSWORD = (() => {
+  const value = process.env.OMNIGENT_ADMIN_PASSWORD;
+  if (!value) {
+    throw new Error(
+      "OMNIGENT_ADMIN_PASSWORD is not set. See tests/e2e/README.md: this suite runs " +
+        "against a real deployment and has no built-in credentials.",
+    );
+  }
+  return value;
+})();
 
 test("smoke: /healthz returns 200 @known-issue omnigent-server-healthcheck-shadowed", async ({
   request,
