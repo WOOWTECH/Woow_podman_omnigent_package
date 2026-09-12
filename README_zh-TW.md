@@ -182,6 +182,7 @@ scripts/upgrade.sh
 ```bash
 scripts/backup.sh                     # -> ~/backups/omnigent/<時間戳>/
 scripts/backup.sh --include-secrets   # 另外存資料庫與 admin 密碼（secrets.env，0600）
+scripts/backup.sh --stop              # 匯出 volume 前先停 runner 與 server，匯出完再啟動
 scripts/restore.sh ~/backups/omnigent/<時間戳> [--with-secrets]
 ```
 

@@ -53,8 +53,10 @@ if ((purge)); then
   fi
   if [[ $DRY != 1 ]]; then
     # A logical dump needs a running database, so back up before ql_uninstall_units stops it.
+    # --stop: the volumes are deleted a few lines below, so there is nothing to keep running
+    # and the export is consistent instead of podman's "may be inconsistent".
     if [[ $(podman inspect --format '{{.State.Status}}' omnigent-postgres 2>/dev/null || true) == running ]]; then
-      "$REPO/scripts/backup.sh" --dest "$BACKUP_DIR" >/dev/null || ql_die "the final backup failed; nothing was deleted"
+      "$REPO/scripts/backup.sh" --stop --dest "$BACKUP_DIR" >/dev/null || ql_die "the final backup failed; nothing was deleted"
     else
       ql_warn "omnigent-postgres is not running: exporting the volumes instead of a database dump"
       for v in "${DATA_VOLUMES[@]}"; do

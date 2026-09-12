@@ -196,6 +196,7 @@ fails when they disagree.
 ```bash
 scripts/backup.sh                     # -> ~/backups/omnigent/<timestamp>/
 scripts/backup.sh --include-secrets   # also the database and admin passwords (secrets.env, 0600)
+scripts/backup.sh --stop              # stop the runner and the server around the volume exports
 scripts/restore.sh ~/backups/omnigent/<timestamp> [--with-secrets]
 ```
 
