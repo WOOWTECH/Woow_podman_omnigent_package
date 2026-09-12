@@ -107,7 +107,7 @@ for c in "${CONTAINERS[@]}"; do ql_check_container_collision "${c%%:*}" "${c#*:}
 # The port must be free, unless our running server is the one already publishing it.
 published=$(sed -n 's/^PublishPort=//p' "$QDIR/omnigent-server.container" 2>/dev/null || true)
 if [[ $published != "$BIND:$PORT:8000" || $(systemctl --user is-active omnigent-server.service 2>/dev/null || true) != active ]] \
-  && command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q .; then
+  && command -v ss >/dev/null 2>&1 && [[ -n $(ss -ltnH "sport = :$PORT" 2>/dev/null || true) ]]; then
   ql_die "port $PORT is already in use on this host (ss -ltnp 'sport = :$PORT'); pick another with --port"
 fi
 # A database volume from a pre-conversion deployment keeps the password it was created with;

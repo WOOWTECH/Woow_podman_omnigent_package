@@ -43,3 +43,57 @@ if grep -rnIE --exclude-dir=node_modules --exclude-dir=lib --exclude=dryrun.loca
 else
   echo "ok   no credential-shaped strings in the units, scripts, tests or READMEs"
 fi
+
+# ------------------------------------------------------------------------------------------
+# Regression: no check in tests/smoke.sh may put a killable producer in a pipeline.
+#
+# `podman logs omnigent-runner 2>&1 | grep -qF -- "$1"` looks right and is not: grep -q exits
+# at the first match, podman logs then takes SIGPIPE and exits 141, and `set -o pipefail`
+# makes PIPESTATUS[0] the pipeline's status. Both runner checks therefore FAILED on every
+# healthy install (grep -c found each string), and scripts/install.sh exited 1 after its
+# 180 s wait. Nothing caught it because nothing ever executed runner_log_has.
+#
+# This runs the real function out of tests/smoke.sh against a stub `podman` whose log is
+# larger than the 64 KiB pipe buffer -- the size at which the producer is actually killed.
+smoke_fn() { # smoke_fn <name>: the source of that function, as tests/smoke.sh defines it
+  local line found=0 depth=0 open close
+  while IFS= read -r line; do
+    if ((!found)); then
+      [[ $line == "$1()"*'{'* ]] || continue
+      found=1
+    fi
+    printf '%s\n' "$line"
+    open=${line//[^\{]/} close=${line//[^\}]/}
+    depth=$((depth + ${#open} - ${#close}))
+    ((depth > 0)) || break
+  done <"$REPO/tests/smoke.sh"
+  ((found))
+}
+
+pipe_stub=$WORK/sigpipe-stub
+mkdir -p "$pipe_stub"
+cat >"$pipe_stub/podman" <<'STUB'
+#!/usr/bin/env bash
+# stand-in for `podman logs omnigent-runner`: the markers the smoke test looks for, then
+# well over 64 KiB of further output, so a consumer that exits early leaves this writing.
+[[ ${1:-} == logs ]] || exit 0
+printf 'omnigent-runner: wrote auth_tokens.json\n'
+printf 'omnigent-runner: tailing /data/pi-agent/logs/host.log\n'
+for i in $(seq 1 4000); do printf 'omnigent-runner: line %s polling for work\n' "$i"; done
+STUB
+chmod 755 "$pipe_stub/podman"
+
+if fn=$(smoke_fn runner_log_has); then
+  rc=0
+  PATH=$pipe_stub:$PATH bash -c "set -uo pipefail
+$fn
+runner_log_has 'tailing'" || rc=$?
+  if ((rc == 0)); then
+    echo "ok   smoke.sh runner_log_has finds a marker in a log bigger than the pipe buffer"
+  else
+    local_fail "smoke.sh runner_log_has returned $rc for a string that IS in the log (141 = the producer was killed by SIGPIPE and pipefail failed the check)"
+  fi
+else
+  local_fail "tests/smoke.sh no longer defines runner_log_has(); this regression test cannot run"
+fi
+unset -f smoke_fn

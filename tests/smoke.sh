@@ -38,7 +38,12 @@ healthy() { # healthy <container>: podman's status, refreshed by one active chec
   [[ $(podman inspect --format '{{.State.Health.Status}}' "$1" 2>/dev/null) == healthy ]] && return 0
   podman healthcheck run "$1" >/dev/null 2>&1
 }
-runner_log_has() { podman logs omnigent-runner 2>&1 | grep -qF -- "$1"; }
+# NOT `podman logs ... | grep -qF`: grep -q exits at the first match, podman logs then takes
+# SIGPIPE and exits 141, and under `set -o pipefail` PIPESTATUS[0] fails the whole check even
+# though the string IS in the log. Both runner checks below failed that way on every healthy
+# install, which made scripts/install.sh exit 1 after its 180 s wait. Read the log into a
+# variable first: no pipe, nothing to kill.
+runner_log_has() { local _l; _l=$(podman logs omnigent-runner 2>&1) || true; grep -qF -- "$1" <<<"$_l"; }
 json_ok() { curl -s -m 10 "$BASE$1" 2>/dev/null | jq -e "$2" >/dev/null 2>&1; } # json_ok <path> <jq filter>
 
 echo "== $APP at $BASE (pi state: $PI_STATE)"
