@@ -39,7 +39,7 @@ while (($#)); do
     --dest) dest=${2:?--dest needs a directory}; shift ;;
     --include-secrets) include_secrets=1 ;;
     --stop) stop=1 ;;
-    -h | --help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,22p' "$0"; exit 0 ;;
     *) ql_die "unknown option $1 (see --help)" ;;
   esac
   shift
