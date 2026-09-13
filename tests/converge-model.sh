@@ -54,7 +54,7 @@ PublishPort=0.0.0.0:8443:8080
 Volume=/home/woowtechopenclaw/Desktop:/workspace:rw
 Volume=/run/user/1000/podman:/run/podman
 Volume=demo-data:/data
-Environment=POSTGRES_PASSWORD=woowtech
+Environment=POSTGRES_PASSWORD=<a-password-stood-here>
 NoNewPrivileges=true
 [Service]
 Restart=always
