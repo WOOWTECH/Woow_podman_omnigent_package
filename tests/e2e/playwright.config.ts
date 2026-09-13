@@ -4,15 +4,18 @@ import { defineConfig, devices } from "@playwright/test";
  * Playwright config for Omnigent 0.11.0 Web UI E2E suite.
  *
  * - Chromium-only so the same suite runs on arm64/amd64 CI (Woow_podman runners).
- * - `baseURL` comes from OMNIGENT_BASE_URL; falls back to the woow-openclaw-services-1
- *   Tailscale endpoint the dev environment uses.
+ * - `baseURL` comes from OMNIGENT_BASE_URL and has no default: point it at the deployment
+ *   under test (http://127.0.0.1:8000 over an SSH forward, or its tailnet URL).
  * - `ignoreHTTPSErrors: true` — Tailscale funnel serves a real cert but leaving this
  *   on prevents surprise flakes when CI resolves the tailnet host with a stale root.
  * - Serialized (workers: 1) so chat-session tests don't race the sidebar session list.
  */
-const BASE_URL =
-  process.env.OMNIGENT_BASE_URL ??
-  "https://woow-openclaw-services-1.tailb7a69b.ts.net:9444";
+const BASE_URL = process.env.OMNIGENT_BASE_URL;
+if (!BASE_URL) {
+  throw new Error(
+    "OMNIGENT_BASE_URL is not set, e.g. OMNIGENT_BASE_URL=http://127.0.0.1:8000 npm test",
+  );
+}
 
 export default defineConfig({
   testDir: "./specs",

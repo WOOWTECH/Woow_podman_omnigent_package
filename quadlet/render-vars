@@ -1,0 +1,9 @@
+# Variables scripts/install.sh may substitute into quadlet/* (D2: rendered at install time).
+# Values come from ~/.config/omnigent/omnigent.env, except OMNIGENT_PI_VOLUME, which
+# scripts/render-args.sh computes from OMNIGENT_PI_STATE. A token that is not listed here,
+# or listed but unset, stops the install before anything is written.
+OMNIGENT_BIND
+OMNIGENT_PORT
+OMNIGENT_ACCOUNTS_BASE_URL
+OMNIGENT_ADMIN_USERNAME
+OMNIGENT_PI_VOLUME

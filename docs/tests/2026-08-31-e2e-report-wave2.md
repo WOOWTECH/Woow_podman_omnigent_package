@@ -1,5 +1,10 @@
 # Omnigent 部署 E2E 全面測試 — Wave 2（深功能）
 
+> **Redaction note (Quadlet conversion, 2026-09-12):** the admin password this report quoted
+> was committed in the repository and is therefore public. It has been removed from this file
+> and from the units; the deployment now generates its credentials as podman secrets, and any
+> host that ran the old values must rotate them (`scripts/rotate-secrets.sh --all`).
+
 > **接續** `2026-08-31-e2e-report.md`。前一輪是靜態走查 + 單 round chat；本輪測 upstream research 沒涵蓋的 21 個深功能面向，用 4 個平行 sub-agent + main thread chrome-devtools MCP 完成。
 >
 > **方法論**：8 條測試線分成 wave1（靜態） + wave2（深功能）。wave2 又切成 sub-agent 平行（Playwright dry-run / Automation E2E / Auth curl / Resilience）與 main thread 序列（chrome-devtools UI 深功能 + RWD）。原因：chrome-devtools MCP 只我這一支瀏覽器 instance，不能平行；curl / ssh / npm 各 sub-agent 獨立可平行。
@@ -65,7 +70,7 @@
 - 🔴 **HIGH — NO login rate limiting**：30 次錯密碼 4 秒內全 401，無 429、無 backoff、無 lockout。線上暴力破解暢通
 - ⚠️ **MED — JWT 無 `jti`**：8h TTL 無法撤銷；洩露 = 8h window
 - ⚠️ **MED — JWT 無 `iss`/`aud`/`nbf`**：跨服務 token confusion 沒 defense-in-depth
-- ⚠️ **LOW — 密碼政策只有 min-length 8**：無複雜度、無 breach-list（admin `woowtech2026` 是字典可猜）
+- ⚠️ **LOW — 密碼政策只有 min-length 8**：無複雜度、無 breach-list（當時的 admin 密碼是字典可猜的字串；已輪替，見下方 redaction note）
 - ⚠️ **LOW — 驗證錯誤 echo 原輸入**：`{"input":"12345"}` 有機會把 log shipper 帶到明碼密碼
 
 ### J. Resilience（sub-agent 跑完 — 結果併入本文件下方 §Resilience results）
@@ -108,7 +113,7 @@
 ### ⚠️ LOW — 4 項
 
 - **W2-LOW-6** — JWT 無 `jti`，8h 洩露 = 8h window
-- **W2-LOW-7** — 密碼政策只有 min-length 8（`woowtech2026` 是字典密碼）
+- **W2-LOW-7** — 密碼政策只有 min-length 8（當時的 admin 密碼是字典密碼；已輪替）
 - **W2-LOW-8** — Validation error echo 原輸入（log shipper 可能捕獲明碼）
 - **W2-LOW-9** — Automation 沒 one-shot 支援（`COUNT=1` 被拒）
 

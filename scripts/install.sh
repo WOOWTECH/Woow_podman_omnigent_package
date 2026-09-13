@@ -1,137 +1,254 @@
 #!/usr/bin/env bash
-# Install the omnigent stack on a rootless podman host: postgres + server + runner
-# as three Quadlet units on a shared omnigent network, plus a systemd
-# health-refresh timer for the server.
+# scripts/install.sh: install or update the omnigent stack (postgres + server + runner) as
+# rootless Quadlet units (podman >= 4.9, systemd --user, linger). Idempotent: an unchanged
+# re-run restarts nothing.
 #
-#   ./scripts/install.sh                    # build runner image + install + start all 3
-#   OD_SKIP_BUILD=1 ./scripts/install.sh    # keep the current runner image
+#   scripts/install.sh [--port N] [--bind ADDR] [--pi-state private|shared] [--set KEY=VALUE]...
+#                      [--rebuild | --no-build] [--no-start] [--dry-run] [--yes]
+#
+#   --port N            web UI port (OMNIGENT_PORT, default 8000); saved in the env file
+#   --bind ADDR         publish address (OMNIGENT_BIND, default 127.0.0.1); saved in the env file
+#   --pi-state MODE     private (own volume, default) or shared (pi-web's pi-agent-data)
+#   --set KEY=VALUE     set any key of config/omnigent.env.example in the env file
+#   --rebuild           rebuild the runner image even when the VERSION tag already exists
+#   --no-build          never build; the runner image tag must already exist
+#   --no-start          install the files and daemon-reload only
+#   --dry-run           render, validate and report what would change; change nothing
+#   --yes               accepted for symmetry with the other scripts (nothing to confirm)
+#
+# Per-host values live in ~/.config/omnigent/omnigent.env (0600), created from
+# config/omnigent.env.example on the first run. Passwords are podman secrets.
+# shellcheck source-path=SCRIPTDIR
 set -euo pipefail
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# shellcheck source=lib/quadlet-lib.sh
+. "$REPO/scripts/lib/quadlet-lib.sh"
+# shellcheck source=render-args.sh
+. "$REPO/scripts/render-args.sh"
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-QUADLET_DIR="${HOME}/.config/containers/systemd"
-USER_UNIT_DIR="${HOME}/.config/systemd/user"
+# ---- per-repo settings -----------------------------------------------------------------
+APP=omnigent
+ENV_FILE=$HOME/.config/$APP/$APP.env
+EXAMPLE=$REPO/config/$APP.env.example
+PODMAN_MIN=4.9
+VERSION=$(<"$REPO/VERSION")
+RUNNER_IMAGE=localhost/woow-omnigent-runner:$VERSION
+# container name : unit that Quadlet generates for it (legacy-collision guard)
+CONTAINERS=(omnigent-postgres:omnigent-postgres.service omnigent-server:omnigent-server.service omnigent-runner:omnigent-runner.service)
+# units to start / restart (generated services and the plain health timer)
+UNITS=(omnigent-postgres.service omnigent-server.service omnigent-runner.service omnigent-server-health.timer)
+PG_VOLUME=omnigent-postgres-data
+QDIR=${QL_QUADLET_DIR:-$HOME/.config/containers/systemd}
+# ------------------------------------------------------------------------------------------
 
-say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
-die()  { printf '\033[1;31mXX\033[0m %s\n' "$*" >&2; exit 1; }
-
-[ "$(id -u)" -ne 0 ] || die "Do not run this as root. Rootless podman is the design."
-command -v podman >/dev/null || die "podman not found"
-
-say "Checking Podman + Quadlet"
-podman --version
-GEN=""
-for p in /usr/lib/systemd/user-generators/podman-user-generator \
-         /usr/libexec/podman/quadlet \
-         /usr/lib/systemd/system-generators/podman-system-generator; do
-    [ -x "$p" ] && { GEN="$p"; break; }
+usage() { sed -n '2,21p' "$0"; }
+sets=() build=auto no_start=0
+while (($#)); do
+  case $1 in
+    --port) sets+=("OMNIGENT_PORT=${2:?--port needs a value}"); shift ;;
+    --bind) sets+=("OMNIGENT_BIND=${2:?--bind needs a value}"); shift ;;
+    --pi-state) sets+=("OMNIGENT_PI_STATE=${2:?--pi-state needs private or shared}"); shift ;;
+    --pi-state=*) sets+=("OMNIGENT_PI_STATE=${1#--pi-state=}") ;;
+    --set) sets+=("${2:?--set needs KEY=VALUE}"); shift ;;
+    --rebuild) build=always ;;
+    --no-build) build=never ;;
+    --no-start) no_start=1 ;;
+    --dry-run) export QL_DRY_RUN=1 ;;
+    --yes) ;;
+    -h | --help) usage; exit 0 ;;
+    *) ql_die "unknown option $1 (see --help)" ;;
+  esac
+  shift
 done
-[ -n "${GEN}" ] || die "Quadlet generator not found. Podman >= 4.4 required."
+export QL_APP=$APP
+DRY=${QL_DRY_RUN:-0}
 
-say "Enabling lingering so the stack survives logout"
-loginctl enable-linger "$(id -un)" || warn "enable-linger failed"
+# ---- 1. host preflight ---------------------------------------------------------------------
+ql_preflight "$PODMAN_MIN"
+for t in curl jq; do command -v "$t" >/dev/null 2>&1 || ql_die "$t not found (sudo apt-get install $t)"; done
+ql_enable_linger
+ql_lock "$APP"
 
-if ! podman volume exists pi-agent-data 2>/dev/null; then
-    warn "External volume pi-agent-data missing — creating an empty one."
-    warn "Install Woow_podman_pi_agent_package too if you want a shared"
-    warn "pi state (sessions, models, skills) with pi-web / OD / code-server."
-    podman volume create pi-agent-data >/dev/null
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-install.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+# ---- 2. per-host settings (D2: rendered from the env file at install time) -----------------
+ql_env_ensure "$EXAMPLE" "$ENV_FILE"
+# Settings are staged in a private copy and saved only after every check below passed, so a
+# rejected --port/--bind/--set never lands in the env file. A dry run never saves them.
+envsrc=$WORK/$APP.env
+if [[ -f $ENV_FILE ]]; then cp -- "$ENV_FILE" "$envsrc"; else cp -- "$EXAMPLE" "$envsrc"; QL_ENV_CREATED=1; fi
+chmod 600 "$envsrc"
+setenv() { QL_DRY_RUN=0 ql_env_set "$envsrc" "$1" "$2"; }
+[[ $QL_ENV_CREATED != 1 ]] || ql_info "created $ENV_FILE with defaults; edit it and re-run to change them"
+for kv in "${sets[@]}"; do
+  [[ $kv == *=* ]] || ql_die "--set wants KEY=VALUE, got '$kv'"
+  grep -q "^${kv%%=*}=" "$EXAMPLE" || ql_die "--set: ${kv%%=*} is not a setting of ${EXAMPLE##*/}"
+  setenv "${kv%%=*}" "${kv#*=}"
+done
+ql_env_load "$envsrc"
+
+BIND=$(ql_env_get OMNIGENT_BIND)
+PORT=$(ql_env_get OMNIGENT_PORT)
+USER_NAME=$(ql_env_get OMNIGENT_ADMIN_USERNAME)
+PI_STATE=$(ql_env_get OMNIGENT_PI_STATE private)
+ql_assert_match OMNIGENT_BIND "$BIND" '(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}'
+[[ $BIND != 0.0.0.0 ]] || ql_die "OMNIGENT_BIND=0.0.0.0 would publish the web UI on every network; use 127.0.0.1 or one LAN IP"
+ql_assert_match OMNIGENT_PORT "$PORT" '[1-9][0-9]{0,4}'
+((PORT <= 65535)) || ql_die "OMNIGENT_PORT=$PORT is not a TCP port"
+[[ $BIND == 127.0.0.1 ]] || ql_warn "OMNIGENT_BIND=$BIND: the web UI is reachable from that network, not only from this host"
+# Rendered into Environment=: Quadlet splits on blanks and systemd would expand "$NAME".
+ql_assert_match OMNIGENT_ACCOUNTS_BASE_URL "$(ql_env_get OMNIGENT_ACCOUNTS_BASE_URL)" '(https?://[^[:space:]"'"'"'\\$]+)?'
+ql_assert_match OMNIGENT_ADMIN_USERNAME "$USER_NAME" '[A-Za-z0-9][A-Za-z0-9._@-]{0,63}'
+ql_assert_match OMNIGENT_PI_STATE "$PI_STATE" 'private|shared'
+
+# ---- 3. legacy guards ------------------------------------------------------------------------
+for c in "${CONTAINERS[@]}"; do ql_check_container_collision "${c%%:*}" "${c#*:}"; done
+# The port must be free, unless our running server is the one already publishing it.
+published=$(sed -n 's/^PublishPort=//p' "$QDIR/omnigent-server.container" 2>/dev/null || true)
+if [[ $published != "$BIND:$PORT:8000" || $(systemctl --user is-active omnigent-server.service 2>/dev/null || true) != active ]] \
+  && command -v ss >/dev/null 2>&1 && [[ -n $(ss -ltnH "sport = :$PORT" 2>/dev/null || true) ]]; then
+  ql_die "port $PORT is already in use on this host (ss -ltnp 'sport = :$PORT'); pick another with --port"
+fi
+# A database volume from a pre-conversion deployment keeps the password it was created with;
+# only a secret holding that password can open it.
+if podman volume exists "$PG_VOLUME" 2>/dev/null && ! podman secret exists omnigent-postgres-password 2>/dev/null; then
+  ql_die "volume $PG_VOLUME exists but the podman secret omnigent-postgres-password does not: create the secret with the database's current password first (README \"Migrating an existing deployment\")"
+fi
+if [[ $PI_STATE == shared ]]; then
+  [[ -f $QDIR/pi-agent-data.volume ]] \
+    || ql_die "OMNIGENT_PI_STATE=shared needs pi-agent-data.volume from Woow_podman_pi_agent_package in $QDIR; install that package first, or use --pi-state private"
+  ql_warn "shared pi state: the runner (pi $(sed -n 's/^ARG PI_CODING_AGENT_VERSION=//p' "$REPO/Containerfile.runner")) writes pi-web's pi-agent-data volume, whose on-disk format is not versioned; keep the pi versions in step"
 fi
 
-if [ "${OD_SKIP_BUILD:-0}" != "1" ]; then
-    say "Building localhost/woow-omnigent-runner:latest"
-    podman build --format=docker -t localhost/woow-omnigent-runner:latest \
-        -f "${REPO_DIR}/Containerfile.runner" "${REPO_DIR}"
+# ---- 4. render the units and validate them against the podman 4.9.3 generator -------------
+mkdir -p "$WORK/src" "$WORK/out"
+cp -p "$REPO"/quadlet/*.container "$REPO"/quadlet/omnigent.network \
+  "$REPO"/quadlet/omnigent-postgres.volume "$REPO"/quadlet/omnigent-server.volume \
+  "$REPO"/systemd/*.service "$REPO"/systemd/*.timer "$WORK/src/"
+# private mode: this package's own pi volume; shared mode: the runner references pi_agent's
+[[ $PI_STATE != private ]] || cp -p "$REPO/quadlet/omnigent-pi.volume" "$WORK/src/"
+RENDER_ARGS=()
+render_args "$envsrc"
+ql_render "$WORK/src" "$envsrc" "$REPO/quadlet/render-vars" "$WORK/out" "${RENDER_ARGS[@]}"
+ql_dryrun "$WORK/out" --verify --ref-dir "$QDIR" || ql_die "the rendered units failed the dry-run; nothing was installed"
+for f in "$WORK/out"/*; do
+  u=$(ql_unit_for "$f")
+  [[ -z $u ]] || ql_check_unit_shadow "$u" "$APP"
+done
+
+# Every check passed: only now do new --port/--bind/--set values reach the env file.
+if [[ $DRY != 1 ]] && ! cmp -s -- "$envsrc" "$ENV_FILE"; then
+  install -m 600 -- "$envsrc" "$ENV_FILE" || ql_die "cannot update $ENV_FILE"
+  ql_info "saved the new settings in $ENV_FILE"
 fi
 
-say "Installing units"
-mkdir -p "${QUADLET_DIR}" "${USER_UNIT_DIR}"
-for unit in omnigent.network omnigent-postgres.container omnigent-server.container omnigent-runner.container; do
-    install -m 0644 "${REPO_DIR}/quadlet/${unit}" "${QUADLET_DIR}/${unit}"
-done
-for unit in omnigent-server-health.service omnigent-server-health.timer; do
-    install -m 0644 "${REPO_DIR}/systemd/${unit}" "${USER_UNIT_DIR}/${unit}"
-done
+# ---- 5. images and secrets, before any unit changes -------------------------------------------
+built=0
+if [[ $build == always ]] || ! podman image exists "$RUNNER_IMAGE"; then
+  [[ $build != never ]] || ql_die "image $RUNNER_IMAGE does not exist and --no-build was given"
+  if [[ $DRY == 1 ]]; then
+    ql_info "[dry-run] would build $RUNNER_IMAGE"
+  else
+    ql_info "building $RUNNER_IMAGE (podman build --format docker; about 5 minutes on a small host)"
+    podman build --format docker -t "$RUNNER_IMAGE" --build-arg "BUILD_VERSION=$VERSION" \
+      -f "$REPO/Containerfile.runner" "$REPO" || ql_die "podman build failed; nothing was changed"
+    built=1
+  fi
+fi
+# pulls the pinned server and postgres images, so a slow pull never runs inside a start timeout
+if podman image exists "$RUNNER_IMAGE"; then ql_pull_images "$WORK/out"; fi
 
-say "Reloading systemd + starting (dependency order: postgres → server → runner)"
-systemctl --user daemon-reload
-systemctl --user enable --now podman.socket
-# Starting the runner also transitively starts server, which transitively
-# starts postgres — but doing them in order lets us surface failures at
-# the right layer if any of them refuses to come up.
-systemctl --user start omnigent-postgres.service
-systemctl --user start omnigent-server.service
-systemctl --user start omnigent-runner.service
-systemctl --user enable --now omnigent-server-health.timer
-
-say "Waiting for omnigent-server /health"
-for i in $(seq 1 60); do
-    # /health returns JSON {"status":"ok"}. Do NOT use /healthz — the
-    # React SPA catch-all serves index.html with HTTP 200 for that path
-    # even when the API is dead, so the probe passes forever.
-    if curl -sSf -o /dev/null http://127.0.0.1:8000/health 2>/dev/null; then
-        say "  ready after ~$((i*2))s"
-        break
-    fi
-    [ "$i" -eq 60 ] && warn "still not ready after 2 min — check: podman logs omnigent-server"
-    sleep 2
-done
-
-# --- Auto-claim admin on first boot ------------------------------------------
-# Upstream server ships needs_setup=true until POST /auth/setup mints the first
-# admin. We read the same OMNIGENT_ADMIN_{USERNAME,PASSWORD} that the runner
-# quadlet uses, so the runner-loop's later curl POST /auth/login lands in a
-# db that already has that admin — no manual /setup form click. On a system
-# where admin already exists this is a no-op (server returns 409, we ignore).
-if curl -sSf -o /dev/null http://127.0.0.1:8000/health 2>/dev/null; then
-    NEEDS="$(curl -sS --max-time 5 http://127.0.0.1:8000/v1/info | jq -r '.needs_setup // false' 2>/dev/null || echo unknown)"
-    if [ "${NEEDS}" = "true" ]; then
-        say "First boot detected (needs_setup=true) — auto-claiming admin"
-        # Pull the runner's admin creds — single source of truth.
-        RUNNER_UNIT="${REPO_DIR}/quadlet/omnigent-runner.container"
-        ADMIN_USER="$(sed -n 's/^Environment=OMNIGENT_ADMIN_USERNAME=//p' "${RUNNER_UNIT}" | head -1)"
-        ADMIN_PW="$(  sed -n 's/^Environment=OMNIGENT_ADMIN_PASSWORD=//p' "${RUNNER_UNIT}" | head -1)"
-        if [ -z "${ADMIN_USER}" ] || [ -z "${ADMIN_PW}" ]; then
-            warn "OMNIGENT_ADMIN_{USERNAME,PASSWORD} not found in quadlet/omnigent-runner.container"
-            warn "Open the base URL and create the first admin manually."
-        else
-            CODE="$(curl -sS -o /tmp/omnigent-setup.$$ -w '%{http_code}' \
-                -X POST -H 'Content-Type: application/json' \
-                --data "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PW}\"}" \
-                --max-time 10 http://127.0.0.1:8000/auth/setup 2>&1)"
-            case "${CODE}" in
-                200|201) say "  admin '${ADMIN_USER}' created" ;;
-                409)     say "  admin already exists — skipping" ;;
-                *)       warn "  /auth/setup returned ${CODE} — response: $(cat /tmp/omnigent-setup.$$ 2>/dev/null | head -c 200)" ;;
-            esac
-            rm -f /tmp/omnigent-setup.$$
-        fi
-    else
-        say "Admin already claimed (needs_setup=${NEEDS}) — skipping auto-setup"
-    fi
+ql_secret_ensure omnigent-postgres-password random:32
+ql_secret_ensure omnigent-admin-password random:24
+db_url_changed=0
+if podman secret exists omnigent-postgres-password 2>/dev/null; then
+  # DATABASE_URL is derived from the password secret on every run, so the two never drift.
+  pw=$(podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-postgres-password) \
+    || ql_die "cannot read the podman secret omnigent-postgres-password"
+  [[ $pw =~ ^[A-Za-z0-9._~-]+$ ]] \
+    || ql_die "the omnigent-postgres-password secret has characters that need URL encoding; rotate it with scripts/rotate-secrets.sh --db"
+  # shellcheck disable=SC2034 # read by ql_secret_ensure through env:OMNIGENT_DATABASE_URL_VALUE
+  OMNIGENT_DATABASE_URL_VALUE="postgresql+psycopg://omnigent:$pw@omnigent-postgres:5432/omnigent"
+  pw=''
+  QL_SECRET_CHANGED=0
+  ql_secret_ensure omnigent-database-url env:OMNIGENT_DATABASE_URL_VALUE --update
+  # shellcheck disable=SC2034 # cleared on purpose; ql_secret_ensure already read it
+  OMNIGENT_DATABASE_URL_VALUE=''
+  [[ ${QL_SECRET_CHANGED:-0} != 1 ]] || db_url_changed=1
+else
+  ql_info "[dry-run] would derive the secret omnigent-database-url from omnigent-postgres-password"
 fi
 
-cat <<EOF
+# ---- 6. install changed files, then start / restart only what changed -----------------------
+changed=$(ql_install_files "$WORK/out" "$APP" --prune)
+[[ -z $changed ]] || ql_info "changed: $(tr '\n' ' ' <<<"$changed")"
+if [[ $DRY == 1 ]]; then
+  ql_info "dry-run complete; nothing was changed"
+  exit 0
+fi
+((built == 0)) || ql_mark_changed "$APP" omnigent-runner.service
+((db_url_changed == 0)) || ql_mark_changed "$APP" omnigent-server.service
+if ((no_start)); then
+  systemctl --user daemon-reload
+  ql_info "installed; not started (--no-start). Start with: systemctl --user start ${UNITS[*]}"
+  exit 0
+fi
+ql_apply_units "$APP" "${UNITS[@]}"
 
-$(say "Done")
+# ---- 7. first-boot admin claim, health and smoke ----------------------------------------------
+BASE=http://$BIND:$PORT
+ql_wait_http "$BASE/health" 200 300 || ql_die "$BASE/health did not answer 200; see: journalctl --user -u omnigent-server -n 100"
 
-  UI (loopback)   http://127.0.0.1:8000
-  Logs            podman logs -f omnigent-server
-                  podman logs -f omnigent-postgres
-                  podman logs -f omnigent-runner
-  Shell           podman exec -it omnigent-server bash
-                  podman exec -it omnigent-runner bash
-  Stop            systemctl --user stop omnigent-runner omnigent-server omnigent-postgres
-  Status          podman ps --format '{{.Names}}\t{{.Status}}'
+# Upstream reports needs_setup=true until POST /auth/setup creates the first admin. Claim it
+# right away with the secret (piped: never in argv or on the terminal); the server is on
+# loopback, so the unauthenticated setup window is this host only, for seconds.
+info=$(curl -s -m 10 "$BASE/v1/info" 2>/dev/null || true)
+# `.needs_setup // "unknown"` would report "unknown" for a literal false: jq's // treats
+# false as empty. Compare explicitly.
+needs=$(jq -r 'if .needs_setup == true then "true" elif .needs_setup == false then "false" else "unknown" end' \
+  <<<"${info:-null}" 2>/dev/null || echo unknown)
+case $needs in
+  false) ql_info "admin already claimed (needs_setup=false)" ;;
+  true)
+    ql_info "first boot (needs_setup=true): claiming admin '$USER_NAME' with the omnigent-admin-password secret"
+    code=$(podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password \
+      | jq -Rn --arg u "$USER_NAME" '{username: $u, password: input}' \
+      | curl -s -o /dev/null -w '%{http_code}' -m 15 -X POST -H 'Content-Type: application/json' \
+        --data @- "$BASE/auth/setup" 2>/dev/null) || code=000
+    case $code in
+      200 | 201) ql_info "admin '$USER_NAME' created" ;;
+      409) ql_info "an admin already exists; nothing to claim" ;;
+      *) ql_die "POST /auth/setup returned HTTP $code; create the admin '$USER_NAME' in the web UI with the password from: podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password" ;;
+    esac
+    ;;
+  *)
+    # Not fatal on its own: tests/smoke.sh below asserts needs_setup=false, so a stack that
+    # really has no admin still fails the install, with a clearer error than this one.
+    ql_warn "cannot read needs_setup from $BASE/v1/info (got: ${info:0:120})"
+    ql_warn "if the web UI asks you to create the first admin, use '$USER_NAME' with the password from:"
+    printf "    podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password\n" >&2
+    ;;
+esac
 
-  Admin login: the credentials in quadlet/omnigent-runner.container
-    (OMNIGENT_ADMIN_USERNAME / OMNIGENT_ADMIN_PASSWORD) are auto-claimed on
-    first boot via POST /auth/setup. Change them before deployment if you
-    care — anyone with clone access can read the defaults.
+# podman's transient health timers are not reliable for postgres (see the health service):
+# run the checks actively while waiting.
+QL_HEALTH_ACTIVE=1 ql_wait_container_healthy omnigent-postgres 180 \
+  || ql_die "omnigent-postgres did not become healthy; see: journalctl --user -u omnigent-postgres -n 100"
+QL_HEALTH_ACTIVE=1 ql_wait_container_healthy omnigent-server 180 \
+  || ql_die "omnigent-server did not become healthy; see: journalctl --user -u omnigent-server -n 100"
+"$REPO/tests/smoke.sh" || ql_die "tests/smoke.sh failed; see the output above"
 
-  For tailnet access with a real (browser-trusted) HTTPS cert, add:
-      podman exec woow-tailscale-gateway \\
-          tailscale serve --bg --https=9444 http://127.0.0.1:8000
-  then open https://woow-openclaw-services-1.tailb7a69b.ts.net:9444/
+pi_hint="podman exec -it omnigent-runner pi login   (once: the private pi volume starts empty)"
+[[ $PI_STATE == private ]] || pi_hint="shared with pi-web (pi-agent-data): log in there"
+cat >&2 <<EOF
+
+$APP $VERSION is installed and healthy.
+
+  Web UI       $BASE/   (put a tailnet or tunnel front end on this host in front; README "Tailnet HTTPS")
+  Admin        $USER_NAME; password: podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password
+  pi           $pi_hint
+  Logs         journalctl --user -u omnigent-server -f   |   podman logs -f omnigent-runner
+  Settings     $ENV_FILE (edit, then re-run $0)
 
 EOF

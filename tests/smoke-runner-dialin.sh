@@ -12,8 +12,11 @@ bad() { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAIL_N=$((FAIL_N+1)); }
 echo "== Runner sees omnigent-server on the private podman network =="
 CODE="$(podman exec omnigent-runner curl -sS -o /dev/null -w '%{http_code}' \
         --max-time 5 http://omnigent-server:8000/health 2>&1)"
-[ "${CODE}" = "200" ] && ok "omnigent-server:8000/health -> ${CODE} from inside runner" \
-                       || bad "omnigent-server:8000/health -> ${CODE} from inside runner"
+if [ "${CODE}" = "200" ]; then
+    ok "omnigent-server:8000/health -> ${CODE} from inside runner"
+else
+    bad "omnigent-server:8000/health -> ${CODE} from inside runner"
+fi
 
 echo
 echo "== omnigent CLI is on the runner PATH =="

@@ -60,19 +60,36 @@ else
         exec sleep infinity
     fi
     log "logging in as ${OMNIGENT_ADMIN_USERNAME} to ${OMNIGENT_SERVER_URL}"
-    RESP=$(curl -sS -X POST -H 'Content-Type: application/json' \
-        --data-binary "{\"username\":\"${OMNIGENT_ADMIN_USERNAME}\",\"password\":\"${OMNIGENT_ADMIN_PASSWORD}\"}" \
-        --max-time 10 "${OMNIGENT_SERVER_URL}/auth/login" 2>&1)
-    TOKEN=$(printf '%s' "${RESP}" | jq -r .token 2>/dev/null || echo null)
-    if [ -z "${TOKEN}" ] || [ "${TOKEN}" = "null" ]; then
-        log "login failed. Server response: ${RESP}"
-        log "check OMNIGENT_ADMIN_PASSWORD matches the admin account created via the web UI"
-        exec sleep infinity
-    fi
-    EXPIRES_IN=$(printf '%s' "${RESP}" | jq -r .expires_in)
+    # jq builds the login JSON from the environment and curl reads it on stdin, so the
+    # password never appears in argv (ps) or in this log. The server's error body is not
+    # logged either: on a validation error it echoes the input back.
+    umask 077
+    mkdir -p "${AUTH_DIR}"
+    RESP_FILE="${AUTH_DIR}/.login-response.json"
+    login() {
+        jq -n '{username: env.OMNIGENT_ADMIN_USERNAME, password: env.OMNIGENT_ADMIN_PASSWORD}' \
+            | curl -sS -o "${RESP_FILE}" -w '%{http_code}' -X POST \
+                -H 'Content-Type: application/json' --data-binary @- \
+                --max-time 10 "${OMNIGENT_SERVER_URL}/auth/login" 2>/dev/null
+    }
+    # On a fresh install scripts/install.sh claims the admin a few seconds after the server
+    # answers /health, so the first attempts may fail: retry, then let systemd restart us.
+    tries=0
+    until CODE=$(login) && [ "${CODE}" = 200 ] && TOKEN=$(jq -er .token "${RESP_FILE}" 2>/dev/null); do
+        tries=$((tries + 1))
+        if [ "${tries}" -ge 30 ]; then
+            rm -f "${RESP_FILE}"
+            log "login still failing after ${tries} tries (last HTTP ${CODE:-none}); exiting so systemd restarts the runner"
+            log "check that the omnigent-admin-password secret matches the admin account (scripts/rotate-secrets.sh --admin)"
+            exit 1
+        fi
+        log "login returned HTTP ${CODE:-none}; the admin may not be claimed yet, retrying in 10s (${tries}/30)"
+        sleep 10
+    done
+    EXPIRES_IN=$(jq -r '.expires_in // 28800' "${RESP_FILE}")
+    rm -f "${RESP_FILE}"
     NOW=$(date +%s)
     EXPIRES_AT="$((NOW + EXPIRES_IN)).0"
-    mkdir -p "${AUTH_DIR}"
     jq -n --arg url "${OMNIGENT_SERVER_URL}" --arg tok "${TOKEN}" \
           --arg uid "${OMNIGENT_ADMIN_USERNAME}" --argjson exp "${EXPIRES_AT}" \
         '{ ($url): { token: $tok, user_id: $uid, expires_at: $exp } }' \

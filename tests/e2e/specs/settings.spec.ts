@@ -44,11 +44,12 @@ test.describe("settings", () => {
     await expect(page.getByText(/ctrl\s*\+?\s*n\b/i).first()).toBeVisible();
   });
 
-  test("settings/members shows woow admin row and Invite member button", async ({
+  test("settings/members shows the admin row and Invite member button", async ({
     page,
   }) => {
     await page.goto("/settings/members");
-    await expect(page.getByText(/^woow$/i).first()).toBeVisible();
+    const admin = process.env.OMNIGENT_ADMIN_USERNAME ?? "admin";
+    await expect(page.getByText(new RegExp(`^${admin}$`, "i")).first()).toBeVisible();
     await expect(page.getByText(/admin/i).first()).toBeVisible();
     await expect(
       page.getByRole("button", { name: /invite member/i }),

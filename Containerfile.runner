@@ -2,10 +2,11 @@
 # and offers the `pi` harness to any session started from the web UI.
 #
 # What lives in here:
-#   - Python 3.12 + pip install omnigent (upstream v0.11.0)
-#   - Node 22 + @earendil-works/pi-coding-agent (pi CLI, same 0.83.0 pin
-#     the code-server / OD / pi-web deployments use — the pi-agent-data
-#     volume schema must agree across all four consumers)
+#   - Python 3.12 + pip install omnigent (ARG OMNIGENT_VERSION below; it must
+#     match the omnigent-server Image= tag, and tests/dryrun.local.sh checks it)
+#   - Node 22 + @earendil-works/pi-coding-agent (pi CLI, ARG below). In
+#     OMNIGENT_PI_STATE=shared mode the runner writes pi-web's pi-agent-data
+#     volume, whose on-disk schema is not versioned: keep the versions close
 #   - /usr/local/bin/pi-code — the HOME-rescoping wrapper (byte-identical
 #     to the one code-server ships; kept in rootfs/ here for review, not
 #     symlinked out of another repo, so this image is self-contained)
@@ -13,11 +14,13 @@
 #     subcommand for a long-lived runner and stays in the foreground so
 #     systemd sees a real process to supervise
 
-# python:3.12-slim gives us Python 3.12 out of the box — omnigent requires
+# python:3.12 gives us Python 3.12 out of the box — omnigent requires
 # >=3.12 and Debian 12 bookworm-slim ships 3.11 (found the hard way in
 # the first build attempt). The image is still Debian-based so
 # apt-get / nodesource / npm all behave the same as bookworm-slim.
-FROM docker.io/library/python:3.12-slim
+# Pinned to an exact version (STANDARD section 3); 3.12.14-slim-trixie had
+# the same digest as the floating 3.12-slim on 2026-09-12.
+FROM docker.io/library/python:3.12.14-slim-trixie
 
 # ARGs declared BEFORE FROM only apply to that FROM line. Re-declare here
 # so the RUN steps below actually see the pinned versions instead of an

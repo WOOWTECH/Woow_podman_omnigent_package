@@ -8,12 +8,25 @@ import os from "node:os";
  * authenticated `page`. We stash `storageState` on disk (per-worker) so
  * repeated tests reuse the session cookie instead of hammering /login.
  *
- * Credentials default to the woow-openclaw dev box; override via env:
- *   OMNIGENT_ADMIN_USERNAME / OMNIGENT_ADMIN_PASSWORD.
+ * The password has NO default: it is the deployment's admin credential and must come from
+ * the environment (see tests/e2e/README.md). Read it out of the podman secret, e.g.
+ *   OMNIGENT_ADMIN_PASSWORD=$(podman secret inspect --showsecret \
+ *       --format '{{.SecretData}}' omnigent-admin-password) npm test
  */
 
-const USERNAME = process.env.OMNIGENT_ADMIN_USERNAME ?? "woow";
-const PASSWORD = process.env.OMNIGENT_ADMIN_PASSWORD ?? "woowtech2026";
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `${name} is not set. See tests/e2e/README.md: this suite runs against a real ` +
+        `deployment and has no built-in credentials.`,
+    );
+  }
+  return value;
+}
+
+const USERNAME = process.env.OMNIGENT_ADMIN_USERNAME ?? "admin";
+const PASSWORD = requiredEnv("OMNIGENT_ADMIN_PASSWORD");
 
 async function performLogin(page: Page): Promise<void> {
   await page.goto("/login");
