@@ -204,6 +204,22 @@ cv_probe_downtime_ms() {
   ' "$log"
 }
 
+# cv_plain_units_to_adopt <app> <unit...>: the plain helper units that are installed by hand
+# (present in ~/.config/systemd/user and in no manifest), one per line. They are ours - same
+# Documentation= URL - but until cv_adopt_plain_units moves them aside, install.sh's shadow
+# guard refuses to run at all, which is correct for a stranger's unit and wrong for ours.
+cv_plain_units_to_adopt() {
+  local app=${1:?usage: cv_plain_units_to_adopt <app> <unit...>} u p manifest
+  shift
+  manifest=${QL_STATE_ROOT:-$HOME/.local/state/woow-quadlet}/$app/manifest
+  for u in "$@"; do
+    p=$CV_SYSTEMD_USER_DIR/$u
+    [[ -f $p && ! -L $p ]] || continue
+    if [[ -f $manifest ]] && grep -qF "  $p" "$manifest"; then continue; fi
+    printf '%s\n' "$u"
+  done
+}
+
 # cv_adopt_plain_units <app> <rendered dir> <doc url> <unit...>
 # Take over the plain helper units that a hand install copied straight into
 # ~/.config/systemd/user. They are ours - same Documentation= URL - but in no manifest, so

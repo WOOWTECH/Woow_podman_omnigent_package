@@ -243,11 +243,23 @@ fi
 if [[ $mode == check ]]; then
   ql_info "step 3/5 (--check): adopting the passwords into podman secrets, then install.sh --dry-run"
   adopt_secrets
-  QL_DRY_RUN=1 "$REPO/scripts/install.sh" --dry-run --pi-state "$pi_state" \
+  mapfile -t to_adopt < <(cv_plain_units_to_adopt "$CV_APP" "${PLAIN_UNITS[@]}")
+  if ((${#to_adopt[@]})); then
+    ql_info "hand-installed helper units the converge will take over (a copy is kept under the state dir):"
+    printf '    %s\n' "${to_adopt[@]}" >&2
+  fi
+  # The dry-run gets a scratch plain-unit directory. Those helper units are ours but in no
+  # manifest yet, so install.sh's shadow guard would refuse to run and validate nothing - and
+  # moving them aside is a real change that --check must not make. Under --dry-run nothing is
+  # written anywhere, so the scratch directory only silences a guard whose answer this script
+  # already knows and just printed.
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/$CV_APP-check.XXXXXX")
+  QL_SYSTEMD_USER_DIR=$scratch "$REPO/scripts/install.sh" --dry-run --pi-state "$pi_state" \
     --set "OMNIGENT_BIND=$BIND" --set "OMNIGENT_PORT=$PORT" \
     --set "OMNIGENT_ADMIN_USERNAME=$ADMIN_USER" --set "OMNIGENT_ACCOUNTS_BASE_URL=$BASE_URL" \
-    || ql_die "install.sh --dry-run failed; the converge would not have got past this point"
-  ql_info "--check complete; nothing was changed"
+    || { rm -rf "$scratch"; ql_die "install.sh --dry-run failed; the converge would not have got past this point"; }
+  rm -rf "$scratch"
+  ql_info "--check complete; no unit file, container or service was changed"
   exit 0
 fi
 

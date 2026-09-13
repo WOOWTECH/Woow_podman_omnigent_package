@@ -67,3 +67,14 @@ grep -q '^adopt_secrets()' "$REPO/scripts/converge.sh" \
 awk '/mode == check/{c=1} c && /adopt_secrets/{a=1} c && a && /install.sh" --dry-run/{ok=1} END{exit !ok}' \
   "$REPO/scripts/converge.sh" || msg="$msg; --check does not adopt the secrets before the dry-run"
 local_check t_local_check_can_reach_the_dry_run "${msg#; }"
+
+# --check must validate the render on a host whose plain helper units were installed by hand.
+# Found on toypark1234: they are ours but in no manifest, so install.sh's shadow guard refused
+# to run and --check validated nothing. Moving them aside is a real change --check must not
+# make, so the dry-run gets a scratch QL_SYSTEMD_USER_DIR and the units are NAMED instead.
+msg=''
+grep -q 'cv_plain_units_to_adopt' "$REPO/scripts/converge.sh" \
+  || msg='--check does not name the hand-installed helper units it will take over'
+grep -q 'QL_SYSTEMD_USER_DIR=$scratch "$REPO/scripts/install.sh" --dry-run' "$REPO/scripts/converge.sh" \
+  || msg="$msg; the dry-run does not get a scratch plain-unit directory"
+local_check t_local_check_survives_hand_installed_helper_units "${msg#; }"
