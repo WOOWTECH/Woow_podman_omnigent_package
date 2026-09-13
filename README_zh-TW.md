@@ -202,39 +202,84 @@ scripts/uninstall.sh --purge-images    # 另外移除 localhost/woow-omnigent-ru
 `--purge` 是這些腳本刪除資料的唯一方式。它會先做一次完整備份，並要求輸入應用名稱確認
 （`--yes` 可略過）。它永遠不會碰 `pi-agent-data`。
 
-## 遷移既有部署
+## 收斂手動編輯過的安裝
 
-適用於已在跑舊版單元的主機（woowtechopenclaw）：
+woowtechopenclaw 上的 omnigent 已經是 Quadlet——只是那些單元是手寫的，而且後來又被就地改過。
+容器名稱、磁碟區（`omnigent-postgres-data`、`omnigent-server-data`）與網路（`omnigent`）都已經
+是本 repo 宣告的那一組，所以**沒有東西需要遷移**：沒有舊容器要改名或 capture，也沒有資料需要用
+別的名字沿用。因此本 repo 不提供 `migrate-legacy.sh`。那台主機需要的是**收斂**，而收斂就是
+`scripts/install.sh`：`ql_install_files` 會在寫入我們的檔案前，先把同名的外來檔案備份一份；
+`ql_apply_units` 只重啟檔案真的變了的單元。這正是 `Woow_podman_pi_agent_package` 在 toypark1234
+上走過的路——把手改過的 `pi-web.container` 重新指向 `%h`/`%t`，代價是 1.5 秒。
 
-1. **先輪替**（見文件開頭的方塊），至少也要在遷移後立刻做。
-2. 備份：`podman exec omnigent-postgres pg_dump -U omnigent -d omnigent -Fc > ~/omnigent-pre-quadlet.dump`
-   （0600）、匯出 `omnigent-server-data`，並保留一份舊單元檔。
-3. 用目前部署實際使用的密碼建立資料庫 secret，讓沿用的 volume 仍可開啟——直接從容器讀出並以
-   pipe 傳入，不要印出來：
+```bash
+scripts/converge.sh --check      # 前置檢查 + 偏移報告 + install.sh --dry-run
+scripts/converge.sh              # 備份、收編 secrets、install.sh、驗證、回報
+scripts/converge.sh              # 再跑一次：「files changed : none」，零停機
+scripts/converge.sh --status
+scripts/converge.sh --rollback   # 放回先前的單元檔，用舊映像重新啟動
+```
 
-   ```bash
-   podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-postgres \
-     | sed -n 's/^POSTGRES_PASSWORD=//p' | tr -d '\n' \
-     | podman secret create --label io.woowtech.app=omnigent omnigent-postgres-password -
-   ```
+`scripts/converge.sh` 自己不安裝任何東西。它只是在那一次 `install.sh` 外面，補上操作者面對線上
+服務時需要的證據：
 
-   `omnigent-admin-password` 同理，從 `omnigent-runner` 的 `OMNIGENT_ADMIN_PASSWORD` 取得。
-   `omnigent-database-url` 由 `install.sh` 自行推導。
-4. 把舊的 plain 單元移開（它們不在本套件的 manifest 中，install.sh 會拒絕覆寫）：
-   `systemctl --user disable --now omnigent-server-health.timer`，再
-   `mv ~/.config/systemd/user/omnigent-server-health.{service,timer} ~/`。
-5. 寫入該主機的設定並安裝：
+**前置檢查寧可拒絕也不猜測。** 三個容器都必須存在、在執行中，且帶有
+`PODMAN_SYSTEMD_UNIT=<名稱>.service`；其他情況都屬於「遷移」而被拒絕。兩個磁碟區都必須存在。
+發布位址、連接埠、base URL、管理員帳號與 pi-state 模式，全部讀自執行中的容器，不用 repo 的預設值。
 
-   ```bash
-   scripts/install.sh --pi-state shared --set OMNIGENT_ADMIN_USERNAME=<目前的 admin> \
-     --set OMNIGENT_ACCOUNTS_BASE_URL=<目前的 base URL>
-   ```
+**逐檔的偏移報告，在任何重啟之前。** 它會列出手寫單元有、而本 repo 沒有的東西。沒有命中任何標記的
+檔案會標成 *no named drift*，而不是「相同」：`install.sh` 比對的是位元組，仍可能因為報告叫不出名字的
+差異（少了 `Label=`、鍵的順序不同）而重寫它。真正權威的清單是 `--check` 的 `[dry-run] would write`
+輸出。在 openclaw 上，報告會列出：
+浮動 tag（`postgres:16-alpine`、`omnigent-server:latest`、`woow-omnigent-runner:latest`）、
+`AutoUpdate=local`、`Environment=POSTGRES_PASSWORD=…` 與內含密碼的 `DATABASE_URL`、缺少
+`SuccessExitStatus=143`，以及把 `pi-agent-data` 寫成裸名稱而非 `.volume` 單元。
 
-   容器、volume 與 network 名稱都沒變，資料會被沿用。server 固定的 v0.12.0 就是該主機目前執行的
-   digest，因此沒有版本跳躍；runner 映像以相同 ARG 重新建置成固定 tag。
-6. 執行 `tests/smoke.sh`，然後 `scripts/rotate-secrets.sh --all`。
+**收編 secrets——這一步不能跳過。** Postgres 角色的密碼是 `initdb` 在那個要被沿用的磁碟區上設定的：
+只有存著**那個**密碼的 secret 才打得開它。`converge.sh` 從執行中的容器讀出來，直接 pipe 進
+`podman secret create`——不經過 argv、journal 或 `set -x`。`install.sh` 在磁碟區存在但 secret 不存在
+時會拒絕執行，這是刻意的；`converge.sh` 正是滿足那個拒絕條件的人。`OMNIGENT_ADMIN_PASSWORD` 也以
+同樣方式收編，runner 才登得進去。`--check` 也會建立這兩個 secret——它們是從已在執行的東西推導出來的
+附加式 podman secret，少了它們 `install.sh --dry-run` 什麼都渲染不出來，一個略過這步的 `--check`
+等於什麼都沒驗證。它仍然不會動到任何單元檔、容器或服務。
 
-回復：放回保存的單元檔（舊映像 tag 仍在）、`daemon-reload`、重啟。除非做過輪替，資料庫不受影響。
+**先備份，並附校驗碼。** `~/backups/omnigent/converge-<timestamp>/` 內含真正的 `pg_dump -Fc`
+（對執行中的 PGDATA 做磁碟區匯出會是破碎的副本）、`pg_dumpall --roles-only`、兩個磁碟區的匯出、
+每個即將被覆寫的單元檔副本、`podman inspect` 與 `precheck.txt`——全部列進 `SHA256SUMS`，權限
+`0700`/`0600`。
+
+**證明資料確實被沿用。** `.volume` 是**用名稱**沿用；唯有名稱仍指向同一個目錄，這才值得相信。
+每個磁碟區的 `CreatedAt` 與掛載點 inode 都在事前記錄、事後比對。不符即判定收斂失敗並自動回復。
+
+**量測停機時間。** 探測器每 100 毫秒從外部取樣 `/health`；重啟前最後一次成功到之後第一次成功之間
+的間隔，就是回報的停機時間。
+
+### `pi-agent-data` 不是我們的
+
+在 `OMNIGENT_PI_STATE=shared` 之下，runner 掛載的是
+[Woow_podman_pi_agent_package](https://github.com/WOOWTECH/Woow_podman_pi_agent_package) 的
+`pi-agent-data`，而 `pi-web`（兩台主機上的線上服務）也掛載同一個磁碟區。本套件只**引用**那個磁碟區
+單元，從不擁有它：不提供 `pi-agent-data.volume`、`install.sh` 不會把它納入安裝清單，這裡也沒有任何
+程式會啟動、重啟、停止或移除 `pi-agent-data-volume.service` 或 `pi-web.service`。`converge.sh` 會在
+事前事後記錄 `pi-web` 的容器 id 與 `StartedAt`，以及磁碟區的識別碼，任一改變就判定失敗——所以
+「pi-web 沒被動到」是日誌裡的量測值，不是假設。`tests/converge-model.local.sh` 把這些全部釘住。
+
+### 回復
+
+`scripts/converge.sh --rollback` 會把儲存的單元檔放回去，reload 並重啟三個服務。收斂過程不會移除
+任何映像，所以舊的浮動 tag 仍在主機上，還原後的單元啟動的就是它先前跑的東西。除非事後輪替過
+secrets，否則資料庫完全未受影響；若已輪替，請一併從備份目錄還原 `omnigent.pgdump`。
+
+### 重跑是安全的，而且不會移動回復點
+
+什麼都沒改變的收斂仍然會做一次新的備份（不論如何，一份 `pg_dump` 與磁碟區匯出都值得留著），但只有
+真正替換過單元檔的那一次才會成為 `--rollback` 的目標。否則第二次、也就是文件要你做的那次 no-op
+執行，會把儲存的收斂前單元悄悄換成已收斂的版本，毀掉唯一的退路。
+
+### 之後
+
+被收編的密碼原本就寫在舊單元檔裡——以明文存在磁碟上，也存在每一份備份裡。請用
+`scripts/rotate-secrets.sh --all` 輪替，然後執行 `tests/smoke.sh`。
 
 ---
 
@@ -250,8 +295,14 @@ config/                 omnigent.env.example
 rootfs/usr/local/bin/   pi-code（HOME 重導 wrapper）、omnigent-runner-loop
 scripts/                install、upgrade、uninstall、backup、restore、rotate-secrets、
                         render-args.sh；lib/quadlet-lib.sh（vendored，校驗和固定）
+scripts/converge.sh     手動安裝的 Quadlet 主機 → 本 repo 的單元：前置檢查、備份、收編 secret、
+                        沿用證明、量測停機、--rollback
+scripts/converge-lib.sh 它與 tests/ 共用的偏移、備份、還原與停機量測輔助函式
 tests/                  dryrun.sh（+ dryrun.local.sh、fixtures/）、smoke.sh、
                         smoke-{container,pi-integration,runner-dialin}.sh、e2e/（Playwright）
+tests/converge-model.sh 以 shim 驅動：偏移偵測、備份往返、停機量測，以及定義「收斂完成」的性質
+                        ——第二次執行什麼都不會變
+tests/shims/            podman 與 systemctl 測試替身（不會建立任何容器）
 ```
 
 ## 驗證部署
