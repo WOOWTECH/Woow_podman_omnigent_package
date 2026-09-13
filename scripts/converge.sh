@@ -149,7 +149,12 @@ adopt_secrets() {
 # rollback
 # =============================================================================================
 if [[ $mode == rollback ]]; then
-  bk=$(cv_state_get BACKUP)
+  # ROLLBACK_BACKUP, not BACKUP: a re-run that changed nothing still takes a fresh backup, and
+  # its units/ holds the ALREADY CONVERGED files. Rolling back to that would be a no-op and the
+  # way back to the pre-converge units would be lost. Only a run that actually replaced a unit
+  # file records a new rollback point.
+  bk=$(cv_state_get ROLLBACK_BACKUP)
+  [[ -n $bk ]] || bk=$(cv_state_get BACKUP)
   [[ -n $bk && -d $bk ]] || ql_die "no converge backup recorded in $CV_STATE"
   [[ $(cv_state_get STATUS) == converged || $(cv_state_get STATUS) == failed ]] \
     || ql_die "nothing to roll back (status: $(cv_state_get STATUS))"
@@ -366,6 +371,8 @@ fi
 cv_state_set STATUS converged
 cv_state_set DOWNTIME_MS "$down"
 cv_state_set CHANGED "${changed_files:-none}"
+# Only a run that replaced a unit file becomes the rollback point; see --rollback above.
+[[ -z $changed_files ]] || cv_state_set ROLLBACK_BACKUP "$bk"
 printf '\n' >&2
 ql_info "converged."
 ql_info "  files changed : ${changed_files:-none}"
@@ -376,6 +383,7 @@ else
   ql_info "  downtime      : ${down} ms (probe every 100 ms against http://$BIND:$PORT/health), wall clock $(((T1 - T0) / 1000)) s"
 fi
 ql_info "  backup        : $bk (sha256sum -c SHA256SUMS)"
-ql_info "  rollback      : $0 --rollback"
+rb=$(cv_state_get ROLLBACK_BACKUP)
+ql_info "  rollback      : $0 --rollback${rb:+   (restores the unit files from $rb)}"
 ql_info "run $0 again: it must report 'files changed : none' and take no downtime. That is the property that says the host and the repo now agree."
 ql_warn "the adopted passwords were in the old unit files, i.e. in plain text on disk and in every backup of them: rotate with scripts/rotate-secrets.sh --all"

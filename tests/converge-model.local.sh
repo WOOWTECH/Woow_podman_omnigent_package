@@ -78,3 +78,15 @@ grep -q 'cv_plain_units_to_adopt' "$REPO/scripts/converge.sh" \
 grep -q 'QL_SYSTEMD_USER_DIR=$scratch "$REPO/scripts/install.sh" --dry-run' "$REPO/scripts/converge.sh" \
   || msg="$msg; the dry-run does not get a scratch plain-unit directory"
 local_check t_local_check_survives_hand_installed_helper_units "${msg#; }"
+
+# A re-run that changed nothing still takes a fresh backup, whose units/ holds the ALREADY
+# CONVERGED files. If --rollback followed the newest backup, the second (no-op) run would
+# silently destroy the only way back to the pre-converge units. Found on toypark1234.
+msg=''
+# -A1: the assertion is about the ROLLBACK BLOCK, not about the word appearing anywhere.
+grep -A1 -F 'bk=$(cv_state_get ROLLBACK_BACKUP)' "$REPO/scripts/converge.sh" \
+  | grep -qF 'bk=$(cv_state_get BACKUP)' \
+  || msg='--rollback does not resolve a dedicated rollback point (with the old key as a fallback)'
+grep -qF '[[ -z $changed_files ]] || cv_state_set ROLLBACK_BACKUP "$bk"' "$REPO/scripts/converge.sh" \
+  || msg="$msg; a run that changed nothing still repoints the rollback"
+local_check t_local_a_no_op_rerun_does_not_move_the_rollback_point "${msg#; }"

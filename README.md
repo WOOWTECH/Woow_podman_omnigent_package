@@ -294,6 +294,14 @@ host and the restored units start on exactly what they ran before. The database 
 unless you rotated the secrets afterwards; if you did, restore `omnigent.pgdump` from the backup
 directory as well.
 
+### Re-running is safe, and it does not move the rollback point
+
+A converge that changed nothing still takes a fresh backup (a `pg_dump` and a volume export
+are worth having either way), but only a run that actually replaced a unit file becomes the
+`--rollback` target. Otherwise the second, no-op run - the one you are told to make - would
+silently replace the saved pre-converge units with the already-converged ones and destroy the
+only way back.
+
 ### Afterwards
 
 The adopted passwords were in the old unit files - plain text on disk, and in every backup of
