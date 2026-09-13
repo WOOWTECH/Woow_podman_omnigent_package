@@ -217,42 +217,83 @@ scripts/uninstall.sh --purge-images    # also remove the localhost/woow-omnigent
 `--purge` is the only way these scripts delete data. It takes a final backup first and asks
 you to type the app name (`--yes` skips the question). It never touches `pi-agent-data`.
 
-## Migrating an existing deployment
+## Converging a hand-edited install
 
-For a host that already runs the pre-conversion units (woowtechopenclaw):
+woowtechopenclaw already runs omnigent as Quadlet - but from units that were written by hand
+and then edited in place. The container names, the volumes (`omnigent-postgres-data`,
+`omnigent-server-data`) and the network (`omnigent`) are already the ones this repo declares,
+so there is **nothing to migrate**: no legacy container to rename or capture, no data to adopt
+by any other name. This repo therefore ships no `migrate-legacy.sh`. What that host needs is a
+**converge**, and the converge is `scripts/install.sh`: `ql_install_files` keeps a copy of every
+foreign file with our name before writing ours, and `ql_apply_units` restarts only the units
+whose file actually changed. It is the same path `Woow_podman_pi_agent_package` took on
+toypark1234, where repointing a hand-edited `pi-web.container` at `%h`/`%t` cost 1.5 s.
 
-1. **Rotate first** (see the box at the top), or at least right after the migration.
-2. Back up: `podman exec omnigent-postgres pg_dump -U omnigent -d omnigent -Fc > ~/omnigent-pre-quadlet.dump`
-   (0600), export `omnigent-server-data`, and keep a copy of the old unit files.
-3. Create the database secret from the password the running deployment uses, so the adopted
-   volume keeps working — read it out of the container and pipe it in, without printing it:
+```bash
+scripts/converge.sh --check      # pre-flight + drift report + install.sh --dry-run
+scripts/converge.sh              # backup, adopt the secrets, install.sh, verify, report
+scripts/converge.sh              # again: "files changed : none", no downtime
+scripts/converge.sh --status
+scripts/converge.sh --rollback   # the previous unit files back, restarted on the old images
+```
 
-   ```bash
-   podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-postgres \
-     | sed -n 's/^POSTGRES_PASSWORD=//p' | tr -d '\n' \
-     | podman secret create --label io.woowtech.app=omnigent omnigent-postgres-password -
-   ```
+`scripts/converge.sh` never installs anything itself. It wraps that one `install.sh` call with
+the evidence an operator needs around a live service:
 
-   Do the same for `omnigent-admin-password` from `OMNIGENT_ADMIN_PASSWORD` on
-   `omnigent-runner`. `install.sh` derives `omnigent-database-url` itself.
-4. Move the old plain units aside (they are not in this package's manifest, so install.sh
-   refuses to overwrite them):
-   `systemctl --user disable --now omnigent-server-health.timer` and
-   `mv ~/.config/systemd/user/omnigent-server-health.{service,timer} ~/`.
-5. Write the host's settings and install:
+**A pre-flight that refuses instead of guessing.** All three containers must exist, be running
+and carry `PODMAN_SYSTEMD_UNIT=<name>.service`; anything else is a migration and is refused.
+Both volumes must exist. The publish address, the port, the base URL, the admin username and
+the pi-state mode are read off the running containers, never defaulted from this repo.
 
-   ```bash
-   scripts/install.sh --pi-state shared --set OMNIGENT_ADMIN_USERNAME=<current admin> \
-     --set OMNIGENT_ACCOUNTS_BASE_URL=<current base URL>
-   ```
+**A drift report, per file, before anything restarts.** On openclaw it names exactly what the
+hand-written units carry that this repo does not: floating tags (`postgres:16-alpine`,
+`omnigent-server:latest`, `woow-omnigent-runner:latest`), `AutoUpdate=local`,
+`Environment=POSTGRES_PASSWORD=…` and a `DATABASE_URL` with the password in it, no
+`SuccessExitStatus=143`, and `Volume=pi-agent-data` as a bare name instead of a `.volume` unit.
 
-   The container, volume and network names are unchanged, so the data is adopted. The server
-   pin v0.12.0 is the digest that host already runs, so there is no version jump; the runner
-   image is rebuilt with the same ARGs under a pinned tag.
-6. `tests/smoke.sh`, then `scripts/rotate-secrets.sh --all`.
+**Secret adoption, which is the one thing that cannot be skipped.** The Postgres role's password
+was set by `initdb` on the volume being adopted: only a secret holding *that* password opens it.
+`converge.sh` reads it out of the running container and pipes it into `podman secret create` -
+it never reaches argv, the journal or `set -x`. `install.sh` refuses to run when the volume
+exists and the secret does not, on purpose; `converge.sh` is what satisfies that refusal.
+`OMNIGENT_ADMIN_PASSWORD` is adopted the same way, so the runner can still log in.
 
-Rollback: restore the saved unit files (the old image tags are still there), `daemon-reload`,
-restart. The database is untouched unless you rotated.
+**A backup first, with checksums.** `~/backups/omnigent/converge-<timestamp>/` holds a real
+`pg_dump -Fc` (a volume export of a live PGDATA is a torn copy), `pg_dumpall --roles-only`, an
+export of both volumes, a copy of every unit file that is about to be overwritten, the
+`podman inspect` and a `precheck.txt` - all in `SHA256SUMS`, `0700`/`0600`.
+
+**Proof that the data was adopted.** A `.volume` adopts by *name*; that is only worth trusting
+if the name still resolves to the same directory. Each volume's `CreatedAt` and mountpoint inode
+are recorded before and asserted after. A mismatch fails the converge and rolls it back.
+
+**A measured downtime.** A prober samples `/health` every 100 ms from outside; the gap between
+the last success before the restart and the first one after it is what gets reported.
+
+### `pi-agent-data` is not ours
+
+In `OMNIGENT_PI_STATE=shared` the runner mounts `pi-agent-data`, the volume of
+[Woow_podman_pi_agent_package](https://github.com/WOOWTECH/Woow_podman_pi_agent_package), which
+`pi-web` - a live service on both hosts - also mounts. This package **references** that volume
+unit and never owns it: it ships no `pi-agent-data.volume`, `install.sh` never stages one, and
+nothing here starts, restarts, stops or removes `pi-agent-data-volume.service` or
+`pi-web.service`. `converge.sh` records `pi-web`'s container id and `StartedAt` and the volume's
+identity before and after, and fails the converge if either moved - so "pi-web was not
+disturbed" is a measurement in the log, not an assumption. `tests/converge-model.local.sh` pins
+all of that.
+
+### Rollback
+
+`scripts/converge.sh --rollback` puts the saved unit files back, reloads and restarts the three
+services. Nothing in the converge removes an image, so the old floating tags are still on the
+host and the restored units start on exactly what they ran before. The database is untouched
+unless you rotated the secrets afterwards; if you did, restore `omnigent.pgdump` from the backup
+directory as well.
+
+### Afterwards
+
+The adopted passwords were in the old unit files - plain text on disk, and in every backup of
+them. Rotate with `scripts/rotate-secrets.sh --all`, then run `tests/smoke.sh`.
 
 ---
 
@@ -268,8 +309,14 @@ config/                 omnigent.env.example
 rootfs/usr/local/bin/   pi-code (HOME-rescoping wrapper), omnigent-runner-loop
 scripts/                install, upgrade, uninstall, backup, restore, rotate-secrets,
                         render-args.sh; lib/quadlet-lib.sh (vendored, checksum-pinned)
+scripts/converge.sh     a hand-installed Quadlet host -> these units: pre-flight, backup,
+                        secret adoption, adoption proof, measured downtime, --rollback
+scripts/converge-lib.sh the drift, backup, restore and downtime helpers it shares with tests/
 tests/                  dryrun.sh (+ dryrun.local.sh, fixtures/), smoke.sh,
                         smoke-{container,pi-integration,runner-dialin}.sh, e2e/ (Playwright)
+tests/converge-model.sh shim-driven: drift, backup round trip, downtime, and the property
+                        that defines a finished converge - the second run changes nothing
+tests/shims/            podman and systemctl doubles (no container is created)
 ```
 
 ## Verifying a deployment
