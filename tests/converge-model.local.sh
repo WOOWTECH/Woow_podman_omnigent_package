@@ -49,14 +49,23 @@ grep -q 'cv_write_checksums' "$REPO/scripts/converge.sh" || msg="$msg; the backu
 grep -q 'DOWNTIME_MS' "$REPO/scripts/converge.sh" || msg="$msg; the downtime is not recorded"
 local_check t_local_the_database_is_dumped_and_its_password_adopted "$msg"
 
-# Found on toypark1234: converge.sh takes ql_lock and then runs install.sh, whose own ql_lock
-# aborted the run. install.sh must skip the lock when the caller already holds it.
+# Found on toypark1234 against quadlet-lib 1.4.0: converge.sh takes ql_lock and then runs
+# install.sh, whose own ql_lock aborted the run, so install.sh was taught to skip the lock on a
+# private WOOW_QL_LOCK_HELD flag. 1.5.0 resolves the nesting in the library instead - ql_lock
+# exports QL_LOCK_HELD and a nested ql_lock keeps the caller's lock, pinned behaviourally by
+# t_a_child_script_reuses_the_lock_its_caller_holds - so install.sh locks unconditionally again.
+# The flag must not come back: it is not a no-op like app_unlocked, it silently stops install.sh
+# locking at all whenever it is stale in the environment.
 msg=''
-grep -qF '[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"' "$REPO/scripts/install.sh" \
-  || msg='install.sh takes the lock unconditionally; the converge would deadlock on itself'
-grep -qF 'export WOOW_QL_LOCK_HELD=$CV_APP' "$REPO/scripts/converge.sh" \
-  || msg="$msg; converge.sh does not announce that it holds the lock"
-local_check t_local_install_sh_honours_the_lock_the_converge_holds "${msg#; }"
+grep -qF 'ql_lock "$APP"' "$REPO/scripts/install.sh" \
+  || msg='install.sh no longer takes the app lock at all'
+grep -q 'WOOW_QL_LOCK_HELD' "$REPO/scripts/install.sh" \
+  && msg="$msg; install.sh still skips ql_lock on a private flag"
+grep -qF 'ql_lock "$CV_APP"' "$REPO/scripts/converge.sh" \
+  || msg="$msg; converge.sh does not take the lock before it calls install.sh"
+grep -q 'WOOW_QL_LOCK_HELD' "$REPO/scripts/converge.sh" \
+  && msg="$msg; converge.sh still exports the obsolete lock flag"
+local_check t_local_install_sh_locks_and_the_library_resolves_the_nesting "${msg#; }"
 
 # --check must be able to reach install.sh --dry-run. Found on toypark1234: install.sh refuses
 # to render while the Postgres volume exists and the secret that opens it does not, so --check

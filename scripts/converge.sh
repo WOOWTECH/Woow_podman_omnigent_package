@@ -101,7 +101,6 @@ fi
 
 ql_preflight "$PODMAN_MIN"
 ql_lock "$CV_APP"
-export WOOW_QL_LOCK_HELD=$CV_APP
 
 # adopt_secrets: create the two podman secrets from the values the hand-written units spell
 # out, unless they already exist. Additive and idempotent: it creates podman secrets and

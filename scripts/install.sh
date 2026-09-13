@@ -67,10 +67,7 @@ DRY=${QL_DRY_RUN:-0}
 ql_preflight "$PODMAN_MIN"
 for t in curl jq; do command -v "$t" >/dev/null 2>&1 || ql_die "$t not found (sudo apt-get install $t)"; done
 ql_enable_linger
-# The migration / converge wrapper in this repo already holds this app's lock and then calls
-# install.sh; without this the nested ql_lock aborts the cutover half way through. Same
-# convention as Woow_podman_nextcloud's install/backup/restore.
-[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"
+ql_lock "$APP"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/$APP-install.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
