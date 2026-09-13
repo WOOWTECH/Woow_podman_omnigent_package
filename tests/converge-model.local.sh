@@ -57,3 +57,13 @@ grep -qF '[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"' "$REPO/scrip
 grep -qF 'export WOOW_QL_LOCK_HELD=$CV_APP' "$REPO/scripts/converge.sh" \
   || msg="$msg; converge.sh does not announce that it holds the lock"
 local_check t_local_install_sh_honours_the_lock_the_converge_holds "${msg#; }"
+
+# --check must be able to reach install.sh --dry-run. Found on toypark1234: install.sh refuses
+# to render while the Postgres volume exists and the secret that opens it does not, so --check
+# died before validating anything until the secret adoption became a function both modes call.
+msg=''
+grep -q '^adopt_secrets()' "$REPO/scripts/converge.sh" \
+  || msg='the secret adoption is not a function both modes can call'
+awk '/mode == check/{c=1} c && /adopt_secrets/{a=1} c && a && /install.sh" --dry-run/{ok=1} END{exit !ok}' \
+  "$REPO/scripts/converge.sh" || msg="$msg; --check does not adopt the secrets before the dry-run"
+local_check t_local_check_can_reach_the_dry_run "${msg#; }"

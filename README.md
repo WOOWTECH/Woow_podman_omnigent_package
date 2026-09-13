@@ -256,7 +256,11 @@ was set by `initdb` on the volume being adopted: only a secret holding *that* pa
 `converge.sh` reads it out of the running container and pipes it into `podman secret create` -
 it never reaches argv, the journal or `set -x`. `install.sh` refuses to run when the volume
 exists and the secret does not, on purpose; `converge.sh` is what satisfies that refusal.
-`OMNIGENT_ADMIN_PASSWORD` is adopted the same way, so the runner can still log in.
+`OMNIGENT_ADMIN_PASSWORD` is adopted the same way, so the runner can still log in. `--check`
+creates those two secrets as well - they are additive podman secrets derived from what is
+already running, and without them `install.sh --dry-run` refuses to render anything, so a
+`--check` that skipped them would validate nothing. It still touches no unit file, no
+container and no service.
 
 **A backup first, with checksums.** `~/backups/omnigent/converge-<timestamp>/` holds a real
 `pg_dump -Fc` (a volume export of a live PGDATA is a torn copy), `pg_dumpall --roles-only`, an

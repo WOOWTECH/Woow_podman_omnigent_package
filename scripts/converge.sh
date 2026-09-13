@@ -6,7 +6,9 @@
 #   scripts/converge.sh --rollback [--yes]
 #   scripts/converge.sh --status
 #
-#   --check        pre-flight + drift report + a dry run of install.sh; changes nothing
+#   --check        pre-flight + drift report + a dry run of install.sh. It creates the two
+#                  podman secrets if they are missing (additive; install.sh refuses to render
+#                  anything without them) and changes nothing else: no unit file, no container.
 #   --pi-state M   override the mode derived from the running runner (private | shared)
 #   --no-auto-rollback  leave a failed converge in place for inspection
 #   --rollback     put the previous unit files back and restart the stack on them
@@ -100,6 +102,48 @@ fi
 ql_preflight "$PODMAN_MIN"
 ql_lock "$CV_APP"
 export WOOW_QL_LOCK_HELD=$CV_APP
+
+# adopt_secrets: create the two podman secrets from the values the hand-written units spell
+# out, unless they already exist. Additive and idempotent: it creates podman secrets and
+# touches no service, no unit file and no container - which is why --check runs it too. It has
+# to happen BEFORE install.sh in either mode, because install.sh refuses to run when the
+# Postgres volume exists and the secret that opens it does not (that refusal is correct: the
+# role's password was set by initdb on the volume being adopted, and only a secret holding that
+# password can open it). Without this, `--check` could not even reach the dry-run.
+adopt_secrets() {
+  ql_info "adopting the passwords the hand-written units spell out into podman secrets"
+  # The Postgres role's password was set by initdb on the volume that is being adopted: only a
+  # secret holding THAT password can open it. Read it out of the running container and pipe it in
+  # - it never reaches argv, the journal or xtrace.
+  if podman secret exists "$DB_SECRET" 2>/dev/null; then
+    ql_info "$DB_SECRET already exists; keeping it"
+  else
+    CONVERGE_SECRET_VALUE=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-postgres \
+      | sed -n 's/^POSTGRES_PASSWORD=//p' | tail -n1)
+    [[ -n $CONVERGE_SECRET_VALUE ]] \
+      || ql_die "omnigent-postgres has no POSTGRES_PASSWORD in its environment and the secret $DB_SECRET does not exist: the adopted volume could not be opened. Create the secret by hand from the password the database really has, then re-run"
+    [[ $CONVERGE_SECRET_VALUE =~ ^[A-Za-z0-9._~-]+$ ]] \
+      || ql_die "the current database password contains characters that need URL encoding in DATABASE_URL; rotate it with scripts/rotate-secrets.sh --db after the converge, and create $DB_SECRET by hand for now"
+    # shellcheck disable=SC2034 # read by ql_secret_ensure through env:CONVERGE_SECRET_VALUE
+    ql_secret_ensure "$DB_SECRET" env:CONVERGE_SECRET_VALUE
+    ql_info "adopted $DB_SECRET from omnigent-postgres (not printed)"
+  fi
+  if podman secret exists "$ADMIN_SECRET" 2>/dev/null; then
+    ql_info "$ADMIN_SECRET already exists; keeping it"
+  else
+    CONVERGE_SECRET_VALUE=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-runner \
+      | sed -n 's/^OMNIGENT_ADMIN_PASSWORD=//p' | tail -n1)
+    if [[ -n $CONVERGE_SECRET_VALUE ]]; then
+      # shellcheck disable=SC2034 # read by ql_secret_ensure through env:CONVERGE_SECRET_VALUE
+      ql_secret_ensure "$ADMIN_SECRET" env:CONVERGE_SECRET_VALUE
+      ql_info "adopted $ADMIN_SECRET from omnigent-runner (not printed)"
+    else
+      ql_die "omnigent-runner has no OMNIGENT_ADMIN_PASSWORD and the secret $ADMIN_SECRET does not exist: the runner would not be able to log in after the converge. Create the secret from the admin account's real password first"
+    fi
+  fi
+  CONVERGE_SECRET_VALUE=''
+  unset CONVERGE_SECRET_VALUE
+}
 
 # =============================================================================================
 # rollback
@@ -197,7 +241,8 @@ if ((!drifted)); then
 fi
 
 if [[ $mode == check ]]; then
-  ql_info "step 3/5 (--check): install.sh --dry-run"
+  ql_info "step 3/5 (--check): adopting the passwords into podman secrets, then install.sh --dry-run"
+  adopt_secrets
   QL_DRY_RUN=1 "$REPO/scripts/install.sh" --dry-run --pi-state "$pi_state" \
     --set "OMNIGENT_BIND=$BIND" --set "OMNIGENT_PORT=$PORT" \
     --set "OMNIGENT_ADMIN_USERNAME=$ADMIN_USER" --set "OMNIGENT_ACCOUNTS_BASE_URL=$BASE_URL" \
@@ -242,38 +287,7 @@ for v in "${OWN_VOLUMES[@]}"; do cv_state_set "VOLID_$v" "$(cv_volume_identity "
 cv_write_checksums "$bk"
 ql_info "backup in $bk (verify with: cd $bk && sha256sum -c SHA256SUMS)"
 
-ql_info "adopting the passwords the hand-written units spell out into podman secrets"
-# The Postgres role's password was set by initdb on the volume that is being adopted: only a
-# secret holding THAT password can open it. Read it out of the running container and pipe it in
-# - it never reaches argv, the journal or xtrace.
-if podman secret exists "$DB_SECRET" 2>/dev/null; then
-  ql_info "$DB_SECRET already exists; keeping it"
-else
-  CONVERGE_SECRET_VALUE=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-postgres \
-    | sed -n 's/^POSTGRES_PASSWORD=//p' | tail -n1)
-  [[ -n $CONVERGE_SECRET_VALUE ]] \
-    || ql_die "omnigent-postgres has no POSTGRES_PASSWORD in its environment and the secret $DB_SECRET does not exist: the adopted volume could not be opened. Create the secret by hand from the password the database really has, then re-run"
-  [[ $CONVERGE_SECRET_VALUE =~ ^[A-Za-z0-9._~-]+$ ]] \
-    || ql_die "the current database password contains characters that need URL encoding in DATABASE_URL; rotate it with scripts/rotate-secrets.sh --db after the converge, and create $DB_SECRET by hand for now"
-  # shellcheck disable=SC2034 # read by ql_secret_ensure through env:CONVERGE_SECRET_VALUE
-  ql_secret_ensure "$DB_SECRET" env:CONVERGE_SECRET_VALUE
-  ql_info "adopted $DB_SECRET from omnigent-postgres (not printed)"
-fi
-if podman secret exists "$ADMIN_SECRET" 2>/dev/null; then
-  ql_info "$ADMIN_SECRET already exists; keeping it"
-else
-  CONVERGE_SECRET_VALUE=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-runner \
-    | sed -n 's/^OMNIGENT_ADMIN_PASSWORD=//p' | tail -n1)
-  if [[ -n $CONVERGE_SECRET_VALUE ]]; then
-    # shellcheck disable=SC2034 # read by ql_secret_ensure through env:CONVERGE_SECRET_VALUE
-    ql_secret_ensure "$ADMIN_SECRET" env:CONVERGE_SECRET_VALUE
-    ql_info "adopted $ADMIN_SECRET from omnigent-runner (not printed)"
-  else
-    ql_die "omnigent-runner has no OMNIGENT_ADMIN_PASSWORD and the secret $ADMIN_SECRET does not exist: the runner would not be able to log in after the converge. Create the secret from the admin account's real password first"
-  fi
-fi
-CONVERGE_SECRET_VALUE=''
-unset CONVERGE_SECRET_VALUE
+adopt_secrets
 
 # The hand-installed plain health units are ours but in no manifest: move them aside so
 # ql_install_files may write this repo's versions instead of refusing them as foreign.

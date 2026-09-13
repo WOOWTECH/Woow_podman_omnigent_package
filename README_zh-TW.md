@@ -236,7 +236,9 @@ scripts/converge.sh --rollback   # 放回先前的單元檔，用舊映像重新
 只有存著**那個**密碼的 secret 才打得開它。`converge.sh` 從執行中的容器讀出來，直接 pipe 進
 `podman secret create`——不經過 argv、journal 或 `set -x`。`install.sh` 在磁碟區存在但 secret 不存在
 時會拒絕執行，這是刻意的；`converge.sh` 正是滿足那個拒絕條件的人。`OMNIGENT_ADMIN_PASSWORD` 也以
-同樣方式收編，runner 才登得進去。
+同樣方式收編，runner 才登得進去。`--check` 也會建立這兩個 secret——它們是從已在執行的東西推導出來的
+附加式 podman secret，少了它們 `install.sh --dry-run` 什麼都渲染不出來，一個略過這步的 `--check`
+等於什麼都沒驗證。它仍然不會動到任何單元檔、容器或服務。
 
 **先備份，並附校驗碼。** `~/backups/omnigent/converge-<timestamp>/` 內含真正的 `pg_dump -Fc`
 （對執行中的 PGDATA 做磁碟區匯出會是破碎的副本）、`pg_dumpall --roles-only`、兩個磁碟區的匯出、
