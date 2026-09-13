@@ -6,6 +6,7 @@
 # them, because the property they pin is "this code never does X to a volume another live
 # service owns", and the only honest way to check a negative is to look for it.
 # shellcheck disable=SC2154 # REPO, npass, nfail, FAILED come from tests/converge-model.sh
+# shellcheck disable=SC2016 # the greps look for literal shell text in another script
 
 local_ok() { npass=$((npass + 1)); printf 'ok    %s\n' "$1"; }
 local_fail() { nfail=$((nfail + 1)); FAILED+=("$1"); printf 'FAIL  %s\n      | %s\n' "$1" "$2"; }
@@ -47,3 +48,12 @@ grep -q 'cv_volume_identity' "$REPO/scripts/converge.sh" || msg="$msg; the volum
 grep -q 'cv_write_checksums' "$REPO/scripts/converge.sh" || msg="$msg; the backup is not checksummed"
 grep -q 'DOWNTIME_MS' "$REPO/scripts/converge.sh" || msg="$msg; the downtime is not recorded"
 local_check t_local_the_database_is_dumped_and_its_password_adopted "$msg"
+
+# Found on toypark1234: converge.sh takes ql_lock and then runs install.sh, whose own ql_lock
+# aborted the run. install.sh must skip the lock when the caller already holds it.
+msg=''
+grep -qF '[[ ${WOOW_QL_LOCK_HELD:-} == "$APP" ]] || ql_lock "$APP"' "$REPO/scripts/install.sh" \
+  || msg='install.sh takes the lock unconditionally; the converge would deadlock on itself'
+grep -qF 'export WOOW_QL_LOCK_HELD=$CV_APP' "$REPO/scripts/converge.sh" \
+  || msg="$msg; converge.sh does not announce that it holds the lock"
+local_check t_local_install_sh_honours_the_lock_the_converge_holds "${msg#; }"
