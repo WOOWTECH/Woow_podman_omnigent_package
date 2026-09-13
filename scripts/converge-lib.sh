@@ -109,7 +109,10 @@ cv_drift_of() {
 
 # cv_drift_report <file...>: prints one line per installed file and returns 1 when anything
 # drifted. A file that is not installed at all is reported as "absent" (install.sh will write
-# it), a file byte-identical to what install.sh renders is reported as "clean".
+# it). A file with none of the markers above is reported as "no named drift" - NOT as
+# "identical": install.sh compares bytes and will still rewrite it for a difference this report
+# has no name for (a missing Label=, a reordered key, a comment). The authoritative list of
+# what would be written is the `[dry-run] would write` output of `--check`.
 cv_drift_report() {
   local f base marks n=0
   for f in "$@"; do
@@ -123,7 +126,7 @@ cv_drift_report() {
     marks=$(cv_drift_of "$f" | LC_ALL=C sort -u | tr '\n' ',')
     marks=${marks%,}
     if [[ -z $marks ]]; then
-      printf '  %-42s clean\n' "$base"
+      printf '  %-42s no named drift\n' "$base"
     else
       printf '  %-42s %s\n' "$base" "$marks"
       n=$((n + 1))

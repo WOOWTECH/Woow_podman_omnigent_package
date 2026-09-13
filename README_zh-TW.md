@@ -227,7 +227,10 @@ scripts/converge.sh --rollback   # 放回先前的單元檔，用舊映像重新
 `PODMAN_SYSTEMD_UNIT=<名稱>.service`；其他情況都屬於「遷移」而被拒絕。兩個磁碟區都必須存在。
 發布位址、連接埠、base URL、管理員帳號與 pi-state 模式，全部讀自執行中的容器，不用 repo 的預設值。
 
-**逐檔的偏移報告，在任何重啟之前。** 在 openclaw 上它會明確列出手寫單元有、而本 repo 沒有的東西：
+**逐檔的偏移報告，在任何重啟之前。** 它會列出手寫單元有、而本 repo 沒有的東西。沒有命中任何標記的
+檔案會標成 *no named drift*，而不是「相同」：`install.sh` 比對的是位元組，仍可能因為報告叫不出名字的
+差異（少了 `Label=`、鍵的順序不同）而重寫它。真正權威的清單是 `--check` 的 `[dry-run] would write`
+輸出。在 openclaw 上，報告會列出：
 浮動 tag（`postgres:16-alpine`、`omnigent-server:latest`、`woow-omnigent-runner:latest`）、
 `AutoUpdate=local`、`Environment=POSTGRES_PASSWORD=…` 與內含密碼的 `DATABASE_URL`、缺少
 `SuccessExitStatus=143`，以及把 `pi-agent-data` 寫成裸名稱而非 `.volume` 單元。

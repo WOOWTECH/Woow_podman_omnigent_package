@@ -245,8 +245,11 @@ and carry `PODMAN_SYSTEMD_UNIT=<name>.service`; anything else is a migration and
 Both volumes must exist. The publish address, the port, the base URL, the admin username and
 the pi-state mode are read off the running containers, never defaulted from this repo.
 
-**A drift report, per file, before anything restarts.** On openclaw it names exactly what the
-hand-written units carry that this repo does not: floating tags (`postgres:16-alpine`,
+**A drift report, per file, before anything restarts.** It names what the hand-written units
+carry that this repo does not. A file with none of those markers is reported as *no named
+drift*, never as identical: `install.sh` compares bytes and will still rewrite it for a
+difference the report has no name for (a missing `Label=`, a reordered key). The authoritative
+list is the `[dry-run] would write` output of `--check`. On openclaw the report names: floating tags (`postgres:16-alpine`,
 `omnigent-server:latest`, `woow-omnigent-runner:latest`), `AutoUpdate=local`,
 `Environment=POSTGRES_PASSWORD=…` and a `DATABASE_URL` with the password in it, no
 `SuccessExitStatus=143`, and `Volume=pi-agent-data` as a bare name instead of a `.volume` unit.

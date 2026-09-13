@@ -95,7 +95,7 @@ t_the_openclaw_shape_is_reported_as_drift() {
   done
 }
 
-t_the_repos_own_shape_is_reported_as_clean() {
+t_the_repos_own_shape_has_no_named_drift() {
   clean_unit "$CV_QDIR/demo.container"
   eq "$(cv_drift_of "$CV_QDIR/demo.container")" '' "a unit already in the repo's shape has no drift"
 }
@@ -114,7 +114,8 @@ t_the_drift_report_names_every_file_and_fails_only_when_something_drifted() {
   drifted_unit "$CV_QDIR/b.container"
   expect_fail cv_drift_report a.container b.container c.container
   has "$OUT" "a.container" "the report names the clean file"
-  has "$OUT" "clean" "the clean file is labelled"
+  has "$OUT" "no named drift" "a file with no named drift is labelled as such, not as identical"
+  hasnt "$OUT" " clean" "\"clean\" would claim the file is identical, which this report cannot know"
   has "$OUT" "literal-home" "the drifted file is labelled"
   has "$OUT" "absent" "a file that is not installed yet is labelled"
   # and with nothing drifted it succeeds
