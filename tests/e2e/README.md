@@ -51,5 +51,5 @@ above, and do not paste it into a shell that records history.
 These tests were generated from a chrome-devtools MCP walk on **2026-08-31** against
 Omnigent **0.11.0** + our runner (pi-native harness) and validated against session
 `0a262a34423647e88330a41377f2a78f` (test prompt `e2e-ultracode-2026`, pi replied via
-GPT-5.6 Sol). The deployment now pins server **v0.12.0**; a few selectors may need a
-refresh on the next run.
+GPT-5.6 Sol). The deployment now pins server **v0.19.1**; the suite has not been re-run
+since the 0.11.0 walk, so expect a few selectors to need a refresh.

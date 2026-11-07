@@ -4,8 +4,9 @@
 # are listed in quadlet/render-vars). Edit the env file and re-run install.sh; do not edit
 # the installed copy.
 #
-# - pinned to v0.12.0: the digest woowtechopenclaw runs, and the omnigent CLI version in
-#   the runner image (bump both together, with a database dump first)
+# - pinned to v0.19.1 by tag and by the digest of the multi-arch index (podman checks the
+#   digest and ignores the tag), and to the omnigent CLI version in the runner image: bump
+#   both together, with a database dump first
 # - DATABASE_URL comes from a podman secret derived from the generated DB password
 # - published on 127.0.0.1 by default; the outward door is a tailnet or tunnel front end
 [Unit]
@@ -16,7 +17,7 @@ After=omnigent-postgres.service
 
 [Container]
 ContainerName=omnigent-server
-Image=ghcr.io/omnigent-ai/omnigent-server:v0.12.0
+Image=ghcr.io/omnigent-ai/omnigent-server:v0.19.1@sha256:b211b81fb739a7be9b326603d54511cc1f1e2f91f311b85ac2ea144c85129d56
 Network=omnigent.network
 PublishPort=@@OMNIGENT_BIND@@:@@OMNIGENT_PORT@@:8000
 Volume=omnigent-server.volume:/data

@@ -7,6 +7,10 @@
 # tests/shims (podman, systemctl). No container is created and the runner's user manager is
 # never touched. The central assertion is the one that defines a finished converge: the second
 # run writes no file and restarts no unit.
+#
+# tests/runner-login.sh drives the runner's login helper and watchdog against a fake auth
+# server and stub CLI commands; the loop is linted here because quadlet-ci.yml's shellcheck
+# only covers scripts/ and tests/.
 name: scripts-ci
 
 on:
@@ -32,5 +36,11 @@ jobs:
       - name: shellcheck the test doubles
         run: shellcheck -x tests/shims/podman tests/shims/systemctl
 
+      - name: shellcheck the runner loop
+        run: shellcheck -x -s sh rootfs/usr/local/bin/omnigent-runner-loop
+
       - name: Converge model (drift, backup, downtime, "the second run changes nothing")
         run: tests/converge-model.sh
+
+      - name: Runner login helper and watchdog (fake auth server, stub CLI)
+        run: tests/runner-login.sh

@@ -2,7 +2,7 @@
 
 [![Podman](https://img.shields.io/badge/Podman-%E2%89%A54.9%20rootless-892CA0)](https://podman.io)
 [![Quadlet](https://img.shields.io/badge/units-Quadlet%20%2B%20systemd-orange)](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
-[![Omnigent](https://img.shields.io/badge/omnigent-0.12.0-blueviolet)](https://github.com/omnigent-ai/omnigent)
+[![Omnigent](https://img.shields.io/badge/omnigent-0.19.1-blueviolet)](https://github.com/omnigent-ai/omnigent)
 [![pi-coding-agent](https://img.shields.io/badge/pi--coding--agent-0.85.1-blue)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -33,9 +33,9 @@ rootless Podman 三容器組，由 systemd 監管：**Postgres**、上游 **serv
 | | |
 |---|---|
 | **Web UI** | 預設 `http://127.0.0.1:8000/`；對外門面是同一台主機上的 tailnet 或 tunnel |
-| **Server** | 上游 `ghcr.io/omnigent-ai/omnigent-server:v0.12.0`，版本固定，不自行建置 |
-| **Database** | 自己的 `postgres:16.15-alpine3.24` 容器與 volume，永不對外 publish |
-| **Runner** | 常駐 sidecar，內含 pi 0.85.1 與 `pi-code` wrapper，掛在 `/data/pi-agent` |
+| **Server** | 上游 `ghcr.io/omnigent-ai/omnigent-server:v0.19.1`，以 tag 加映像 digest 固定，不自行建置 |
+| **Database** | 自己的 `postgres:16.15-alpine3.24` 容器（以 digest 固定）與 volume，永不對外 publish |
+| **Runner** | 常駐 sidecar，內含 pi 0.85.1 與 `pi-code` wrapper，掛在 `/data/pi-agent`；自己維持登入有效，主機常駐程式掛掉時會重新啟動 |
 | **Secrets** | 安裝時產生的 podman secret：資料庫密碼（檔案掛載）、`DATABASE_URL`、admin 密碼 |
 | **監管** | `systemd --user` Quadlet 單元、Postgres 真正的就緒 gate、30 秒健康檢查 timer |
 
@@ -86,6 +86,20 @@ podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-pas
 ```bash
 podman exec -it omnigent-runner pi login
 ```
+
+### Runner 如何登入
+
+Runner 是一般的 Omnigent *host*。它用和 `omnigent login` 相同的方式登入：`POST /auth/login`
+帶 `issue_refresh`，再以 CLI 自己的 `store_token` 存起來，所以主機常駐程式能用 refresh grant
+換發 access token，不會在 8 小時的 session token 到期後離線。之後 `omnigent-runner-loop` 每
+`OMNIGENT_RUNNER_CHECK_INTERVAL` 秒（預設 60）巡檢一次：refresh grant 達到絕對效期（server 端的
+`OMNIGENT_GRANT_MAX_LIFETIME_DAYS`，預設 30 天）時，用該帳號的密碼 secret 重新登入；常駐程式
+行程死掉時重新啟動它。密碼只以環境變數交給 runner，不會被印出，也不會出現在命令列。
+
+**Host 屬於註冊它的帳號。** `GET /v1/hosts` 只列出呼叫者自己的 host，要在別的帳號的 host 上啟動
+是 403（在 0.19.1 上實測）。Runner 以誰登入，就只有那個帳號能在 Host picker 看到並使用這個
+runner；目前就是 `OMNIGENT_ADMIN_USERNAME` 指定的帳號。容器被重建（每次
+`systemctl --user restart omnigent-runner` 都會）會註冊一個新的 host，舊的留下來顯示為 *offline*。
 
 ### 設定
 
@@ -175,7 +189,17 @@ scripts/upgrade.sh
 腳本會印出對應的 `scripts/restore.sh` 指令。
 
 升級 server 時要同時改 `quadlet/omnigent-server.container` 的 `Image=`、`Containerfile.runner`
-的 `ARG OMNIGENT_VERSION` 與 `VERSION`；三者不一致時 `tests/dryrun.sh` 會失敗。
+的 `ARG OMNIGENT_VERSION` 與 `VERSION`；三者不一致時 `tests/dryrun.sh` 會失敗。Server 與 Postgres
+映像寫成 `tag@sha256:<digest>`（podman 會驗證 digest、忽略 tag）；新版 tag 的 digest 用
+`skopeo inspect --format '{{.Digest}}' docker://ghcr.io/omnigent-ai/omnigent-server:v<version>` 取得。
+
+### 從 0.12.0 到 0.19.1
+
+Server 第一次在舊資料庫上啟動時會自動遷移 schema，而且遷移是單向的，所以要先備份（
+`scripts/upgrade.sh` 會做）。這條路徑已在拋棄式的環境演練過：含一個 admin、一個第二帳號與一個
+session 的 0.12.0 資料庫，在 0.19.1 上全部完整接手（內建 agent 由 15 個變 17 個），server 日誌沒有
+錯誤。Runner 映像為 omnigent 0.19.1 重建；managed terminal 需要 tmux >= 3.3，映像內是 3.5a。
+`OMNIGENT_FEATURES` 維持 `usage_page,harness_install`，兩個名稱仍然有效。
 
 ## 備份與還原
 
@@ -292,7 +316,8 @@ quadlet/                omnigent.network、omnigent-{postgres,server,pi}.volume�
                         omnigent-{postgres,server,runner}.container、render-vars
 systemd/                omnigent-server-health.{service,timer}：30 秒健康狀態更新
 config/                 omnigent.env.example
-rootfs/usr/local/bin/   pi-code（HOME 重導 wrapper）、omnigent-runner-loop
+rootfs/usr/local/bin/   pi-code（HOME 重導 wrapper）、omnigent-runner-loop（開機流程與看門狗）、
+                        omnigent-runner-login（以 refresh grant 登入）
 scripts/                install、upgrade、uninstall、backup、restore、rotate-secrets、
                         render-args.sh；lib/quadlet-lib.sh（vendored，校驗和固定）
 scripts/converge.sh     手動安裝的 Quadlet 主機 → 本 repo 的單元：前置檢查、備份、收編 secret、
@@ -300,6 +325,8 @@ scripts/converge.sh     手動安裝的 Quadlet 主機 → 本 repo 的單元：
 scripts/converge-lib.sh 它與 tests/ 共用的偏移、備份、還原與停機量測輔助函式
 tests/                  dryrun.sh（+ dryrun.local.sh、fixtures/）、smoke.sh、
                         smoke-{container,pi-integration,runner-dialin}.sh、e2e/（Playwright）
+tests/runner-login.sh   以假的認證伺服器與假的 CLI 指令測 runner 的登入工具與看門狗
+                        （不需容器、不需安裝 omnigent）
 tests/converge-model.sh 以 shim 驅動：偏移偵測、備份往返、停機量測，以及定義「收斂完成」的性質
                         ——第二次執行什麼都不會變
 tests/shims/            podman 與 systemctl 測試替身（不會建立任何容器）
@@ -309,6 +336,7 @@ tests/shims/            podman 與 systemctl 測試替身（不會建立任何�
 
 ```bash
 tests/dryrun.sh                    # 渲染並檢查單元；不啟動容器
+tests/runner-login.sh              # runner 的登入與看門狗，用替身測；不啟動容器
 tests/smoke.sh                     # 單元、健康、只聽 loopback、admin 登入、runner 註冊
 bash tests/smoke-container.sh      # 三個容器都在、/health、pg_isready
 bash tests/smoke-pi-integration.sh # pi 版本、pi-code wrapper、/data/pi-agent、OMNIGENT_PI_PATH
@@ -331,6 +359,7 @@ systemctl --user restart omnigent-server       # runner 會透過 Requires= 一�
 
 - 預設 **只發布在 loopback**；對外門面是本機的 tailnet 或 tunnel。
 - **Postgres 永不對外 publish**，只在私有 omnigent 網路上可達。
+- **映像固定**：server 與 Postgres 以 tag 加 digest 引用，runner 的基底映像以 tag 引用。
 - repo、單元檔與 journal 中 **沒有明碼憑證**（見 Secrets）。
 - **`OMNIGENT_AUTH_ENABLED=1`**：內建帳號流程。任何超出本機可達的部署都不要設成 `0`。
 - **首次開機的空窗**：admin 名冊為空時 `POST /auth/setup` 不需驗證。install.sh 會在 server 回應

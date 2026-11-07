@@ -70,7 +70,7 @@ check "POST /auth/login as '$USER_NAME' with the omnigent-admin-password secret 
 # The runner logs in and registers a host on every start; give a fresh start a moment.
 QL_POLL_INTERVAL=5 ql_wait_until 180 "the runner to log in and start its host daemon" \
   runner_log_has 'tailing' >/dev/null 2>&1
-check "runner logged in (auth_tokens.json)" runner_log_has 'auth_tokens.json'
+check "runner logged in (stored with a refresh grant)" runner_log_has 'refresh grant stored'
 check "runner host daemon is up (log tail started)" runner_log_has 'tailing'
 
 want_vol=omnigent-pi-data
