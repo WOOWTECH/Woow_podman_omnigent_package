@@ -31,7 +31,8 @@ Environment variables:
 Pass the admin and runner-owner passwords from their Podman secrets as above;
 do not paste their values into shell history.
 
-Run the chat spec as the runner owner after `podman exec -it omnigent-runner pi login`:
+Run the chat spec as the runner owner after opening `podman exec -it omnigent-runner pi`
+and completing `/login` in its interactive UI:
 
 ```
 OMNIGENT_BASE_URL=http://127.0.0.1:8000 \

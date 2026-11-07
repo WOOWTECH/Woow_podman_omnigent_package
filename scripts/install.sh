@@ -222,7 +222,7 @@ QL_HEALTH_ACTIVE=1 ql_wait_container_healthy omnigent-server 180 \
   || ql_die "omnigent-server did not become healthy; see: journalctl --user -u omnigent-server -n 100"
 "$REPO/tests/smoke.sh" || ql_die "tests/smoke.sh failed; see the output above"
 
-pi_hint="podman exec -it omnigent-runner pi login   (once: the private pi volume starts empty)"
+pi_hint="podman exec -it omnigent-runner pi; then enter /login in Pi (once: the private pi volume starts empty)"
 [[ $PI_STATE == private ]] || pi_hint="shared with pi-web (pi-agent-data): log in there"
 cat >&2 <<EOF
 

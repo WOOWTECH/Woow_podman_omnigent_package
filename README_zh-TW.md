@@ -81,11 +81,11 @@ podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-runner-pa
 透過 tailnet／tunnel 開啟 Web UI（或 `ssh -L 8000:127.0.0.1:8000 <host>` 後開
 <http://localhost:8000>），以 env 檔中的 `OMNIGENT_RUNNER_USERNAME` 登入。這是日常使用的非管理員
 帳號，runner 也用它登入，因此能看到自己的 host；`omnigent-admin-password` 只供帳號管理使用。
-private pi 模式下，
-替 runner 做一次 pi 登入：
+private pi 模式下，替 runner 做一次 pi 登入；啟動互動介面後輸入 `/login`，
+再依供應商畫面完成授權：
 
 ```bash
-podman exec -it omnigent-runner pi login
+podman exec -it omnigent-runner pi
 ```
 
 ### Runner 如何登入
@@ -118,7 +118,7 @@ runner；目前就是 `OMNIGENT_RUNNER_USERNAME` 指定的帳號。容器被重�
 ### pi state：private 或 shared
 
 - **private**（預設）：runner 使用本套件擁有的 `omnigent-pi-data`。需要在 runner 內做一次
-  `pi login`，會被 `scripts/backup.sh` 備份，`uninstall.sh --purge` 會刪除它。不與 pi-web 共用，
+  在互動介面輸入 `/login` 完成供應商授權。登入狀態會被 `scripts/backup.sh` 備份，`uninstall.sh --purge` 會刪除它。不與 pi-web 共用，
   因此沒有 pi 版本落差問題。
 - **shared**（`--pi-state shared`）：runner 掛載
   [`Woow_podman_pi_agent_package`](https://github.com/WOOWTECH/Woow_podman_pi_agent_package)

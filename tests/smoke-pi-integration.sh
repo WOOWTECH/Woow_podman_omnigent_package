@@ -2,7 +2,7 @@
 # Smoke: the runner has the pinned pi, the pi-code wrapper is installed, /data/pi-agent is
 # mounted and OMNIGENT_PI_PATH points at the wrapper. The sibling-artefact checks only mean
 # something in OMNIGENT_PI_STATE=shared mode; in private mode they SKIP until someone has
-# run `podman exec -it omnigent-runner pi login`.
+# run `podman exec -it omnigent-runner pi`, then enter `/login`.
 set -uo pipefail
 
 EXPECTED_PI_VERSION="${EXPECTED_PI_VERSION:-0.85.1}"
