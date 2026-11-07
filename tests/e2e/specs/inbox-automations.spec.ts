@@ -10,29 +10,29 @@ test.describe("inbox", () => {
 });
 
 test.describe("automations", () => {
-  test("automations: 'New task' opens modal with Name / Prompt / Runs with / Model / Frequency / Time fields", async ({
+  test("automations: 'New automation' opens modal with Name / Prompt / Runs with / Model / Frequency / Time fields", async ({
     page,
   }) => {
     // Route note: sidebar link labeled "Automations" points at `/tasks`.
     await page.goto("/tasks");
-    await page.getByRole("button", { name: /new task/i }).click();
+    await page.getByRole("button", { name: /^new automation$/i }).click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByLabel(/^name$/i)).toBeVisible();
     await expect(dialog.getByLabel(/^prompt$/i)).toBeVisible();
-    await expect(dialog.getByLabel(/runs with/i)).toBeVisible();
-    await expect(dialog.getByLabel(/^model$/i)).toBeVisible();
-    await expect(dialog.getByLabel(/frequency/i)).toBeVisible();
+    await expect(dialog.getByText(/^runs with$/i)).toBeVisible();
+    await expect(dialog.getByText(/^model$/i)).toBeVisible();
+    await expect(dialog.getByText(/^frequency$/i)).toBeVisible();
     await expect(dialog.getByLabel(/^time$/i)).toBeVisible();
   });
 
-  test("automations: Cancel closes modal without creating a task", async ({
+  test("automations: Cancel closes modal without creating an automation", async ({
     page,
   }) => {
     // Route note: sidebar link labeled "Automations" points at `/tasks`.
     await page.goto("/tasks");
     const rowsBefore = await page.getByRole("row").count();
-    await page.getByRole("button", { name: /new task/i }).click();
+    await page.getByRole("button", { name: /^new automation$/i }).click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: /^cancel$/i }).click();
