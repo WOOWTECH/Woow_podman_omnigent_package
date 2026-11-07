@@ -43,14 +43,22 @@ test.describe.serial("chat as runner owner", () => {
 
     await page.getByTestId("new-chat-landing-input").fill(prompt);
     await page.getByTestId("new-chat-landing-submit").click();
-    await expect(page).toHaveURL(/\/c\/[^/?#]+/, { timeout: 30_000 });
-    const sessionId = new URL(page.url()).pathname.split("/").pop();
+    // Omnigent first navigates to /c/temp:<id>, then replaces that URL when
+    // the server commits the real session. Only the latter has an API record.
+    await expect(page).toHaveURL(/\/c\/(?!temp:)[a-f0-9]{32}(?:[/?#]|$)/, {
+      timeout: 30_000,
+    });
+    const sessionId = new URL(page.url()).pathname.match(/\/c\/([a-f0-9]{32})/)?.[1];
+    expect(sessionId, `Expected a session ID in ${page.url()}`).toBeTruthy();
+    const sessionUrl = new URL(`/v1/sessions/${sessionId}`, page.url()).toString();
 
     // The user's own prompt contains marker. A committed assistant item must
     // exist before the rendered answer can satisfy this test.
     await expect.poll(async () => {
-      const response = await page.request.get(`/v1/sessions/${sessionId}`);
-      if (!response.ok()) return null;
+      const response = await page.request.get(sessionUrl);
+      if (!response.ok()) {
+        throw new Error(`Session read failed: HTTP ${response.status()} at ${sessionUrl}`);
+      }
       const session = await response.json();
       const replies = (session.items ?? []).filter(
         (item: { type: string; data?: { role?: string } }) =>
