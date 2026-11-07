@@ -8,8 +8,9 @@
 #             omnigent-postgres-password and omnigent-database-url secrets, restart the server
 #   --admin   read the NEW admin password on stdin, verify it with a login, replace the
 #             omnigent-admin-password secret and restart the runner. Change the password in
-#             the web UI first (Settings -> Account): v0.12.0 has no API for it, and the
-#             runner needs the secret to match whatever the account now uses.
+#             the web UI first (Settings -> Account): this script does not change the
+#             account's password, and the runner needs the secret to match whatever the
+#             account now uses.
 #   --all     --db, then --admin
 #
 # The values are never printed, never passed in argv and never written to disk. Run it right

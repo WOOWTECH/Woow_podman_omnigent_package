@@ -3,23 +3,22 @@
 #
 # Boot sequence:
 #   1. Wait for omnigent-server /health.
-#   2. If ~/.omnigent/auth_tokens.json is missing (fresh container FS,
-#      since $HOME is baked into the image, not a volume), POST
-#      /auth/login with OMNIGENT_ADMIN_{USERNAME,PASSWORD} and write the
-#      JWT in the exact shape omnigent CLI expects — keyed by the
-#      server URL, containing `token`, `user_id`, `expires_at`.
-#   3. Kick off `omnigent host --background --non-interactive` — the
-#      host daemon dials in, registers this container as a host with
-#      the server, and stays up in its own process.
-#   4. `exec tail -F` the host daemon's log so podman/systemd sees a
-#      live foreground process to supervise, and the log surfaces in
-#      `podman logs -f omnigent-runner`.
+#   2. Log in with omnigent-runner-login: POST /auth/login for a login-scoped refresh grant,
+#      then the CLI's own store_token(), so the host daemon renews its access token by itself.
+#      The login is retried while the account may not exist yet (a fresh install creates it
+#      a few seconds after the server answers /health).
+#   3. Kick off `omnigent host --background --non-interactive` — the host daemon dials in,
+#      registers this container as a host with the server, and stays up in its own process.
+#   4. Stay in the foreground, so podman/systemd sees a live process, and watch over the
+#      runner: tail the host daemon's log (it surfaces in `podman logs -f omnigent-runner`),
+#      renew the login when it can no longer be renewed from its refresh grant (the grant has
+#      an absolute lifetime, OMNIGENT_GRANT_MAX_LIFETIME_DAYS on the server, 30 days by
+#      default), and start the host daemon again if it is gone.
 #
-# On a container restart this whole thing runs again — auth_tokens.json
-# is missing (ephemeral FS), we re-login with the same credentials,
-# re-register with a fresh host_id, done. The old host_id in the server
-# DB is left orphan (offline), which is the same shape you'd get if a
-# user's laptop went to sleep — server tolerates it fine.
+# On a container restart this whole thing runs again — $HOME is baked into the image, not a
+# volume, so the stored login is gone, we log in again and register with a fresh host id.
+# The old host id in the server DB is left behind (offline), which is the same shape you'd
+# get if a user's laptop went to sleep — the server tolerates it fine.
 set -eu
 
 log() { printf '[omnigent-runner-loop] %s\n' "$*"; }
@@ -27,7 +26,7 @@ log() { printf '[omnigent-runner-loop] %s\n' "$*"; }
 log "omnigent CLI: $(omnigent --version 2>/dev/null || echo unknown)"
 log "pi CLI:       $(pi --version 2>/dev/null || echo unknown)"
 log "server URL:   ${OMNIGENT_SERVER_URL:-<unset>}"
-log "admin user:   ${OMNIGENT_ADMIN_USERNAME:-<unset>}"
+log "account:      ${OMNIGENT_RUNNER_USERNAME:-${OMNIGENT_ADMIN_USERNAME:-<unset>}}"
 log "PI wrapper:   ${OMNIGENT_PI_PATH:-<unset>}"
 
 # --- 1. Wait for server -------------------------------------------------
@@ -48,71 +47,75 @@ if [ -n "${OMNIGENT_SERVER_URL:-}" ]; then
     log "server up after $((i * 5))s"
 fi
 
-# --- 2. Auto-login + write auth_tokens.json ----------------------------
-AUTH_DIR="${HOME}/.omnigent"
-AUTH_FILE="${AUTH_DIR}/auth_tokens.json"
-if [ -s "${AUTH_FILE}" ]; then
-    log "auth_tokens.json already present — skipping login"
-else
-    if [ -z "${OMNIGENT_ADMIN_USERNAME:-}" ] || [ -z "${OMNIGENT_ADMIN_PASSWORD:-}" ]; then
-        log "OMNIGENT_ADMIN_{USERNAME,PASSWORD} unset — cannot auto-register"
-        log "podman exec into the container and follow the manual login steps"
-        exec sleep infinity
-    fi
-    log "logging in as ${OMNIGENT_ADMIN_USERNAME} to ${OMNIGENT_SERVER_URL}"
-    # jq builds the login JSON from the environment and curl reads it on stdin, so the
-    # password never appears in argv (ps) or in this log. The server's error body is not
-    # logged either: on a validation error it echoes the input back.
-    umask 077
-    mkdir -p "${AUTH_DIR}"
-    RESP_FILE="${AUTH_DIR}/.login-response.json"
-    login() {
-        jq -n '{username: env.OMNIGENT_ADMIN_USERNAME, password: env.OMNIGENT_ADMIN_PASSWORD}' \
-            | curl -sS -o "${RESP_FILE}" -w '%{http_code}' -X POST \
-                -H 'Content-Type: application/json' --data-binary @- \
-                --max-time 10 "${OMNIGENT_SERVER_URL}/auth/login" 2>/dev/null
-    }
-    # On a fresh install scripts/install.sh claims the admin a few seconds after the server
-    # answers /health, so the first attempts may fail: retry, then let systemd restart us.
-    tries=0
-    until CODE=$(login) && [ "${CODE}" = 200 ] && TOKEN=$(jq -er .token "${RESP_FILE}" 2>/dev/null); do
-        tries=$((tries + 1))
-        if [ "${tries}" -ge 30 ]; then
-            rm -f "${RESP_FILE}"
-            log "login still failing after ${tries} tries (last HTTP ${CODE:-none}); exiting so systemd restarts the runner"
-            log "check that the omnigent-admin-password secret matches the admin account (scripts/rotate-secrets.sh --admin)"
-            exit 1
-        fi
-        log "login returned HTTP ${CODE:-none}; the admin may not be claimed yet, retrying in 10s (${tries}/30)"
-        sleep 10
-    done
-    EXPIRES_IN=$(jq -r '.expires_in // 28800' "${RESP_FILE}")
-    rm -f "${RESP_FILE}"
-    NOW=$(date +%s)
-    EXPIRES_AT="$((NOW + EXPIRES_IN)).0"
-    jq -n --arg url "${OMNIGENT_SERVER_URL}" --arg tok "${TOKEN}" \
-          --arg uid "${OMNIGENT_ADMIN_USERNAME}" --argjson exp "${EXPIRES_AT}" \
-        '{ ($url): { token: $tok, user_id: $uid, expires_at: $exp } }' \
-        > "${AUTH_FILE}"
-    chmod 600 "${AUTH_FILE}"
-    log "auth_tokens.json written (JWT expires in ${EXPIRES_IN}s)"
+# --- 2. Log in ----------------------------------------------------------
+if [ -z "${OMNIGENT_RUNNER_USERNAME:-${OMNIGENT_ADMIN_USERNAME:-}}" ] \
+   || [ -z "${OMNIGENT_RUNNER_PASSWORD:-${OMNIGENT_ADMIN_PASSWORD:-}}" ]; then
+    log "OMNIGENT_RUNNER_{USERNAME,PASSWORD} (or OMNIGENT_ADMIN_{USERNAME,PASSWORD}) unset — cannot auto-register"
+    log "podman exec into the container and run omnigent login by hand"
+    exec sleep infinity
 fi
+umask 077
+tries=0
+until omnigent-runner-login; do
+    tries=$((tries + 1))
+    if [ "${tries}" -ge 30 ]; then
+        log "login still failing after ${tries} tries; exiting so systemd restarts the runner"
+        log "check that the account's password secret matches the account (scripts/rotate-secrets.sh)"
+        exit 1
+    fi
+    log "login failed; the account may not exist yet, retrying in 10s (${tries}/30)"
+    sleep 10
+done
 
 # --- 3. Register as host in the background -----------------------------
+start_host() {
+    if ! omnigent host --background --non-interactive --server "${OMNIGENT_SERVER_URL}" 2>&1 | sed 's/^/[omnigent host] /'; then
+        log "omnigent host --background returned non-zero (may already be running)"
+    fi
+}
+# `host status` keeps listing a daemon whose process died, as "process": "offline",
+# so "is anything listed" is not enough: look for a daemon whose process is online.
+host_up() {
+    omnigent host status --json --server "${OMNIGENT_SERVER_URL}" 2>/dev/null \
+        | jq -e '[.daemons[]? | select(.process == "online")] | length > 0' >/dev/null 2>&1
+}
 log "registering as omnigent host"
-if ! omnigent host --background --non-interactive --server "${OMNIGENT_SERVER_URL}" 2>&1 | sed 's/^/[omnigent host] /'; then
-    log "omnigent host --background returned non-zero (may already be running)"
-fi
+start_host
 
-# --- 4. Foreground: tail the host daemon log ---------------------------
+# --- 4. Foreground: tail the host daemon log and watch over the runner ---
 LOG_DIR="${HOME}/.omnigent/logs/host"
+# The names are omnigent's own, host-<date>-<time>-<n>.log, so ls is safe here.
+# shellcheck disable=SC2012
+latest_log() { ls -t "${LOG_DIR}"/host-*.log 2>/dev/null | head -1; }
 log "waiting for host daemon log directory to appear"
 i=0
-until [ -n "$(ls -1 ${LOG_DIR}/*.log 2>/dev/null | head -1)" ]; do
+until [ -n "$(latest_log)" ]; do
     i=$((i + 1))
     [ "$i" -ge 30 ] && { log "no host log after 30s — falling back to sleep forever"; exec sleep infinity; }
     sleep 1
 done
-LATEST=$(ls -t ${LOG_DIR}/*.log 2>/dev/null | head -1)
-log "tailing ${LATEST} in the foreground so podman/systemd sees a live process"
-exec tail -F "${LATEST}"
+TAIL_PID=
+follow_log() { # follow the newest daemon log; a restarted daemon writes a new file
+    [ -z "${TAIL_PID}" ] || kill "${TAIL_PID}" 2>/dev/null || true
+    LATEST=$(latest_log)
+    log "tailing ${LATEST} in the foreground so podman/systemd sees a live process"
+    tail -F "${LATEST}" &
+    TAIL_PID=$!
+}
+trap 'kill "${TAIL_PID}" 2>/dev/null; exit 0' TERM INT
+follow_log
+
+INTERVAL="${OMNIGENT_RUNNER_CHECK_INTERVAL:-60}"
+while kill -0 "${TAIL_PID}" 2>/dev/null; do
+    sleep "${INTERVAL}" &
+    wait $! || true
+    omnigent-runner-login --ensure || log "could not keep the login fresh (see above); trying again in ${INTERVAL}s"
+    if ! host_up; then
+        log "host daemon is gone; starting it again"
+        start_host
+        sleep 3
+        [ "$(latest_log)" = "${LATEST}" ] || follow_log
+    fi
+done
+log "the log tail ended; exiting so systemd restarts the runner"
+exit 1

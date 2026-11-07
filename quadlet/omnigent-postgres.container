@@ -12,7 +12,7 @@ Documentation=https://github.com/WOOWTECH/Woow_podman_omnigent_package
 
 [Container]
 ContainerName=omnigent-postgres
-Image=docker.io/library/postgres:16.15-alpine3.24
+Image=docker.io/library/postgres:16.15-alpine3.24@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
 Network=omnigent.network
 Volume=omnigent-postgres.volume:/var/lib/postgresql/data
 

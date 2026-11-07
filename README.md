@@ -2,7 +2,7 @@
 
 [![Podman](https://img.shields.io/badge/Podman-%E2%89%A54.9%20rootless-892CA0)](https://podman.io)
 [![Quadlet](https://img.shields.io/badge/units-Quadlet%20%2B%20systemd-orange)](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
-[![Omnigent](https://img.shields.io/badge/omnigent-0.12.0-blueviolet)](https://github.com/omnigent-ai/omnigent)
+[![Omnigent](https://img.shields.io/badge/omnigent-0.19.1-blueviolet)](https://github.com/omnigent-ai/omnigent)
 [![pi-coding-agent](https://img.shields.io/badge/pi--coding--agent-0.85.1-blue)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -36,9 +36,9 @@ session started from the web UI.
 | | |
 |---|---|
 | **Web UI** | `http://127.0.0.1:8000/` by default; the front door is a tailnet or tunnel on the same host |
-| **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:v0.12.0`, pinned; no local build |
-| **Database** | Its own `postgres:16.15-alpine3.24` container and volume, never published |
-| **Runner** | Always-on sidecar with pi 0.85.1 and the `pi-code` wrapper, wired to `/data/pi-agent` |
+| **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:v0.19.1`, pinned by tag and image digest; no local build |
+| **Database** | Its own `postgres:16.15-alpine3.24` container (digest-pinned) and volume, never published |
+| **Runner** | Always-on sidecar with pi 0.85.1 and the `pi-code` wrapper, wired to `/data/pi-agent`; keeps its own login fresh and restarts its host daemon if it dies |
 | **Secrets** | podman secrets generated at install: database password (file-mounted), `DATABASE_URL`, admin password |
 | **Supervision** | `systemd --user` Quadlet units, a real readiness gate on Postgres, a 30 s health-refresh timer |
 
@@ -94,6 +94,25 @@ In private pi mode, give the runner its own pi login once:
 ```bash
 podman exec -it omnigent-runner pi login
 ```
+
+### How the runner signs in
+
+The runner is an ordinary Omnigent *host*. It logs in the way `omnigent login` does:
+`POST /auth/login` with `issue_refresh`, stored with the CLI's own `store_token`, so the host
+daemon renews its access token from a refresh grant instead of dropping offline when the
+8 hour session token lapses. `omnigent-runner-loop` then watches over it every
+`OMNIGENT_RUNNER_CHECK_INTERVAL` seconds (60 by default): it logs in again with the account's
+password secret once the refresh grant has reached its absolute lifetime (the server's
+`OMNIGENT_GRANT_MAX_LIFETIME_DAYS`, 30 days by default), and starts the host daemon again
+if its process died. The password reaches the runner only as an environment variable and is
+never printed or put on a command line.
+
+**A host belongs to the account that registered it.** `GET /v1/hosts` lists only the caller's
+own hosts, and launching on another account's host is a 403 (checked on 0.19.1). Whoever the
+runner logs in as is the only account that sees this runner in the Host picker; today that is
+the account named by `OMNIGENT_ADMIN_USERNAME`. A container that is recreated (every
+`systemctl --user restart omnigent-runner` does that) registers a new host and leaves the old
+one behind as *offline*.
 
 ### Settings
 
@@ -189,7 +208,18 @@ script prints the exact `scripts/restore.sh` command for it.
 
 Bumping the server means bumping `Image=` in `quadlet/omnigent-server.container`,
 `ARG OMNIGENT_VERSION` in `Containerfile.runner` and `VERSION` together; `tests/dryrun.sh`
-fails when they disagree.
+fails when they disagree. The server and Postgres images are written `tag@sha256:<digest>`
+(podman checks the digest and ignores the tag); get the digest of a new tag with
+`skopeo inspect --format '{{.Digest}}' docker://ghcr.io/omnigent-ai/omnigent-server:v<version>`.
+
+### From 0.12.0 to 0.19.1
+
+The server migrates its schema when it first starts on the old database, and the migration is
+one-way, so take the dump first (`scripts/upgrade.sh` does). It was rehearsed on a throwaway
+stack: a 0.12.0 database with an admin, a second account and a session came up on 0.19.1 with
+all of them intact (the built-in agents went from 15 to 17) and no errors in the server log.
+The runner image is rebuilt for omnigent 0.19.1; managed terminals need tmux >= 3.3, the image
+has 3.5a. `OMNIGENT_FEATURES` stays `usage_page,harness_install`, both still valid names.
 
 ## Backup and restore
 
@@ -321,7 +351,8 @@ quadlet/                omnigent.network, omnigent-{postgres,server,pi}.volume,
                         omnigent-{postgres,server,runner}.container, render-vars
 systemd/                omnigent-server-health.{service,timer}: 30 s health refresh
 config/                 omnigent.env.example
-rootfs/usr/local/bin/   pi-code (HOME-rescoping wrapper), omnigent-runner-loop
+rootfs/usr/local/bin/   pi-code (HOME-rescoping wrapper), omnigent-runner-loop (boot and
+                        watchdog), omnigent-runner-login (login with a refresh grant)
 scripts/                install, upgrade, uninstall, backup, restore, rotate-secrets,
                         render-args.sh; lib/quadlet-lib.sh (vendored, checksum-pinned)
 scripts/converge.sh     a hand-installed Quadlet host -> these units: pre-flight, backup,
@@ -329,6 +360,8 @@ scripts/converge.sh     a hand-installed Quadlet host -> these units: pre-flight
 scripts/converge-lib.sh the drift, backup, restore and downtime helpers it shares with tests/
 tests/                  dryrun.sh (+ dryrun.local.sh, fixtures/), smoke.sh,
                         smoke-{container,pi-integration,runner-dialin}.sh, e2e/ (Playwright)
+tests/runner-login.sh   the runner's login helper and watchdog against a fake auth server and
+                        stub CLI commands (no container, no omnigent install)
 tests/converge-model.sh shim-driven: drift, backup round trip, downtime, and the property
                         that defines a finished converge - the second run changes nothing
 tests/shims/            podman and systemctl doubles (no container is created)
@@ -338,6 +371,7 @@ tests/shims/            podman and systemctl doubles (no container is created)
 
 ```bash
 tests/dryrun.sh                    # renders the units and checks them; no containers
+tests/runner-login.sh              # the runner's login and watchdog against doubles; no containers
 tests/smoke.sh                     # units, health, loopback, admin login, runner registration
 bash tests/smoke-container.sh      # three containers up, /health, pg_isready
 bash tests/smoke-pi-integration.sh # pi version, pi-code wrapper, /data/pi-agent, OMNIGENT_PI_PATH
@@ -360,6 +394,8 @@ systemctl --user restart omnigent-server       # the runner follows through Requ
 
 - **Loopback publish** by default; the outward door is a tailnet or tunnel on this host.
 - **Postgres is never published** and only reachable on the private omnigent network.
+- **Pinned images**: the server and Postgres are referenced by tag and digest, the runner base
+  image by tag.
 - **No plaintext credentials** in the repo, the units or the journal (see Secrets).
 - **`OMNIGENT_AUTH_ENABLED=1`**: the built-in accounts flow. Do not set it to `0` on anything
   reachable beyond this host.

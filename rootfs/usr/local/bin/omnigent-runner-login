@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""omnigent-runner-login: log the runner in the way `omnigent login` does, and keep that login fresh.
+
+  omnigent-runner-login            log in and store the credential
+  omnigent-runner-login --ensure   do nothing while the stored token is good; renew it from its
+                                   refresh grant; log in again when it cannot be renewed
+
+The account comes from OMNIGENT_RUNNER_USERNAME / OMNIGENT_RUNNER_PASSWORD, falling back to
+OMNIGENT_ADMIN_USERNAME / OMNIGENT_ADMIN_PASSWORD, and the server from OMNIGENT_SERVER_URL.
+
+The credential is stored with the CLI's own store_token(), refresh grant included, so the host
+daemon renews its access token by itself (runner/_entry.py: load_token, then refresh_stored_token)
+and nothing here hand-writes ~/.omnigent/auth_tokens.json. A hand-written entry has no refresh
+grant: the daemon goes offline when its 8 hour token lapses.
+
+Exit status: 0 done, 2 the server refused the credentials, 3 the server could not be reached or
+answered something unexpected. The password is read from the environment only. Neither it nor any
+response body is ever printed: on a validation error the server echoes its input back.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+OK, REFUSED, UNREACHABLE = 0, 2, 3
+
+
+def say(message: str) -> None:
+    print(f"[omnigent-runner-login] {message}", flush=True)
+
+
+def credentials() -> tuple[str, str] | None:
+    user = os.environ.get("OMNIGENT_RUNNER_USERNAME") or os.environ.get("OMNIGENT_ADMIN_USERNAME")
+    password = os.environ.get("OMNIGENT_RUNNER_PASSWORD") or os.environ.get("OMNIGENT_ADMIN_PASSWORD")
+    return (user, password) if user and password else None
+
+
+def login(server: str) -> int:
+    pair = credentials()
+    if pair is None:
+        say("no account: set OMNIGENT_RUNNER_USERNAME and OMNIGENT_RUNNER_PASSWORD")
+        return REFUSED
+    user, password = pair
+    # issue_refresh asks for the long-lived refresh grant that `omnigent login` also asks for.
+    body = json.dumps({"username": user, "password": password, "issue_refresh": True}).encode()
+    request = urllib.request.Request(f"{server}/auth/login", data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            reply = json.load(response)
+    except urllib.error.HTTPError as error:
+        say(f"the server answered HTTP {error.code} to the login of '{user}'")
+        return REFUSED if error.code in (400, 401, 403, 422) else UNREACHABLE
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        say(f"the server could not be reached ({type(error).__name__})")
+        return UNREACHABLE
+    token = reply.get("token") if isinstance(reply, dict) else None
+    account = reply.get("user") if isinstance(reply, dict) else None
+    user_id = account.get("id") if isinstance(account, dict) else None
+    expires_in = reply.get("expires_in", 8 * 3600) if isinstance(reply, dict) else None
+    refresh = reply.get("refresh_token") if isinstance(reply, dict) else None
+    if (not isinstance(token, str) or not token or not isinstance(user_id, str) or not user_id
+            or isinstance(expires_in, bool) or not isinstance(expires_in, (int, float)) or expires_in <= 0
+            or (refresh is not None and not isinstance(refresh, str))):
+        say("the login reply does not have the shape this runner expects")
+        return UNREACHABLE
+    from omnigent.cli_auth import store_token
+    store_token(server, token, user_id, time.time() + expires_in, refresh_token=refresh)
+    say(f"logged in as '{user_id}' (access token {int(expires_in)} s, refresh grant {'stored' if refresh else 'NOT issued'})")
+    return OK
+
+
+def ensure(server: str) -> int:
+    from omnigent.cli_auth import REFRESH_MIN_REMAINING_SECONDS, load_token, refresh_stored_token
+    if load_token(server, min_remaining_seconds=REFRESH_MIN_REMAINING_SECONDS):
+        return OK
+    if refresh_stored_token(server):
+        say("renewed the access token from the refresh grant")
+        return OK
+    say("the stored login cannot be renewed (no grant, revoked, or past its lifetime): logging in again")
+    return login(server)
+
+
+def main(argv: list[str]) -> int:
+    server = os.environ.get("OMNIGENT_SERVER_URL", "").rstrip("/")
+    if not server:
+        say("OMNIGENT_SERVER_URL is not set")
+        return UNREACHABLE
+    if argv[1:] == ["--ensure"]:
+        return ensure(server)
+    if len(argv) > 1:
+        say("usage: omnigent-runner-login [--ensure]")
+        return UNREACHABLE
+    return login(server)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

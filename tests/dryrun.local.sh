@@ -10,12 +10,24 @@ local_fail() { echo "FAIL $*"; failures=$((failures + 1)); }
 ver=$(<"$REPO/VERSION")
 runner_tag=$(sed -n 's|^Image=localhost/woow-omnigent-runner:||p' "$REPO/quadlet/omnigent-runner.container")
 arg_ver=$(sed -n 's/^ARG OMNIGENT_VERSION=//p' "$REPO/Containerfile.runner")
-server_tag=$(sed -n 's|^Image=ghcr.io/omnigent-ai/omnigent-server:v||p' "$REPO/quadlet/omnigent-server.container")
+server_ref=$(sed -n 's|^Image=ghcr.io/omnigent-ai/omnigent-server:v||p' "$REPO/quadlet/omnigent-server.container")
+server_tag=${server_ref%%@*}
 if [[ $ver == "$runner_tag" && ${ver%%-*} == "$arg_ver" && ${ver%%-*} == "$server_tag" ]]; then
   echo "ok   versions agree (VERSION=$ver, omnigent $arg_ver)"
 else
   local_fail "versions disagree: VERSION=$ver runner=$runner_tag ARG=$arg_ver server=v$server_tag"
 fi
+
+# The server and Postgres images are pinned by digest as well as by tag (tag@sha256:<64 hex>),
+# so a dropped digest cannot slip through a version bump.
+for unit in server postgres; do
+  img=$(sed -n 's|^Image=||p' "$REPO/quadlet/omnigent-$unit.container")
+  if [[ $img =~ ^[^@]+:[^@:/]+@sha256:[0-9a-f]{64}$ ]]; then
+    echo "ok   omnigent-$unit image pinned by tag and digest"
+  else
+    local_fail "omnigent-$unit.container Image=$img is not tag@sha256:<digest>"
+  fi
+done
 
 # The runner base image must be pinned to an exact version (STANDARD section 3).
 if grep -E '^FROM ' "$REPO/Containerfile.runner" | grep -qvE ':[0-9]+\.[0-9]+\.[0-9]+-'; then
@@ -77,7 +89,7 @@ cat >"$pipe_stub/podman" <<'STUB'
 # stand-in for `podman logs omnigent-runner`: the markers the smoke test looks for, then
 # well over 64 KiB of further output, so a consumer that exits early leaves this writing.
 [[ ${1:-} == logs ]] || exit 0
-printf 'omnigent-runner: wrote auth_tokens.json\n'
+printf 'omnigent-runner: logged in as admin (access token 28800 s, refresh grant stored)\n'
 printf 'omnigent-runner: tailing /data/pi-agent/logs/host.log\n'
 for i in $(seq 1 4000); do printf 'omnigent-runner: line %s polling for work\n' "$i"; done
 STUB
