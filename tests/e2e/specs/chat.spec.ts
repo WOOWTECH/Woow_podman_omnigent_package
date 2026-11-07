@@ -1,60 +1,82 @@
-import { test, expect } from "../fixtures/auth";
+import { test, expect } from "@playwright/test";
 
-/**
- * Chat spec — serial: creating parallel sessions collides with the sidebar
- * "recent sessions" refresh and produces flaky ordering assertions.
- */
-test.describe.serial("chat", () => {
-  test("chat: create new session, send prompt, receive pi reply within 90s", async ({
-    page,
-  }) => {
-    const nanoid = Math.random().toString(36).slice(2, 10);
-    const marker = `playwright-smoke-${nanoid}`;
-    const prompt = `Reply with exactly the word: ${marker}`;
+/** The runner host belongs to operator, so admin cannot start a Pi session on it. */
+const USERNAME = process.env.OMNIGENT_CHAT_USERNAME ?? "operator";
 
-    await page.goto("/");
-    await page
-      .getByRole("link", { name: /^new session$/i })
-      .or(page.getByRole("button", { name: /^new session$/i }))
-      .first()
-      .click();
-
-    const composer = page
-      .getByRole("textbox", { name: /describe a task|message|prompt/i })
-      .first();
-    await expect(composer).toBeVisible();
-    await composer.fill(prompt);
-    await composer.press("Enter");
-
-    // Pi replies via the runner harness — allow up to 90s for the model round-trip.
-    await expect(page.getByText(marker, { exact: false })).toBeVisible({
-      timeout: 90_000,
+test.describe.serial("chat as runner owner", () => {
+  test.beforeEach(async ({ page }) => {
+    const password = process.env.OMNIGENT_CHAT_PASSWORD;
+    if (!password) {
+      throw new Error(
+        "OMNIGENT_CHAT_PASSWORD is required for chat E2E. See tests/e2e/README.md.",
+      );
+    }
+    await page.goto("/login");
+    await page.getByLabel(/username/i).fill(USERNAME);
+    await page.getByLabel(/password/i).fill(password);
+    await page.getByRole("button", { name: /sign in|log in|login/i }).click();
+    await expect(page.getByText(/what should we build/i)).toBeVisible({
+      timeout: 20_000,
     });
   });
 
-  test("chat: harness picker menu shows Pi + Polly + Debby + Create custom agent", async ({
+  test("chat: Pi returns an assistant message through the connected runner", async ({
     page,
   }) => {
-    await page.goto("/");
-    // Harness picker is the composer's leading "Runs with" / harness button.
-    const picker = page
-      .getByRole("button", { name: /pi|harness|runs with/i })
-      .first();
-    await picker.click();
-    const menu = page.getByRole("menu").or(page.getByRole("listbox"));
-    await expect(menu).toBeVisible();
-    await expect(menu.getByText(/^pi$/i)).toBeVisible();
-    await expect(menu.getByText(/^polly$/i)).toBeVisible();
-    await expect(menu.getByText(/^debby$/i)).toBeVisible();
-    await expect(menu.getByText(/create custom agent/i)).toBeVisible();
+    test.setTimeout(150_000);
+    const marker = `playwright-smoke-${Math.random().toString(36).slice(2, 10)}`;
+    const prompt = `Reply with exactly the word: ${marker}`;
+
+    await expect(page.getByTestId("new-chat-landing-host-chip")).toHaveAttribute(
+      "aria-label",
+      /online/i,
+    );
+    await page.getByTestId("new-chat-landing-agent-select").click();
+    await page.getByRole("menuitem", { name: /other/i }).first().click();
+    const pi = page.getByRole("menuitem", { name: "Pi", exact: true });
+    await expect(pi, "Pi must be ready on the connected runner").toBeEnabled();
+    await pi.click();
+    await expect(page.getByTestId("new-chat-landing-agent-select")).toHaveAttribute(
+      "aria-label",
+      /pi/i,
+    );
+
+    await page.getByTestId("new-chat-landing-input").fill(prompt);
+    await page.getByTestId("new-chat-landing-submit").click();
+    await expect(page).toHaveURL(/\/c\/[^/?#]+/, { timeout: 30_000 });
+    const sessionId = new URL(page.url()).pathname.split("/").pop();
+
+    // The user's own prompt contains marker. A committed assistant item must
+    // exist before the rendered answer can satisfy this test.
+    await expect.poll(async () => {
+      const response = await page.request.get(`/v1/sessions/${sessionId}`);
+      if (!response.ok()) return null;
+      const session = await response.json();
+      const replies = (session.items ?? []).filter(
+        (item: { type: string; data?: { role?: string } }) =>
+          item.type === "message" && item.data?.role === "assistant",
+      );
+      return replies.flatMap(
+        (item: { data: { content: Array<{ text?: string }> } }) =>
+          item.data.content.map((part) => part.text ?? ""),
+      ).join("").trim();
+    }, { timeout: 90_000, intervals: [1_000, 2_000, 5_000] }).toBe(marker);
+    await expect(page.getByText(marker, { exact: true })).toBeVisible();
   });
 
-  test("chat: keyboard shortcut Ctrl+N navigates to New session", async ({
-    page,
-  }) => {
+  test("chat: harness picker lists Pi, Polly, and Debby", async ({ page }) => {
+    await page.getByTestId("new-chat-landing-agent-select").click();
+    const menu = page.getByRole("menu");
+    await expect(menu.getByText(/^polly$/i)).toBeVisible();
+    await expect(menu.getByText(/^debby$/i)).toBeVisible();
+    await menu.getByRole("menuitem", { name: /other/i }).first().click();
+    await expect(menu.getByRole("menuitem", { name: "Pi", exact: true })).toBeVisible();
+  });
+
+  test("chat: Ctrl+Shift+O opens a new session", async ({ page }) => {
     await page.goto("/settings/account");
     await expect(page.getByRole("heading", { name: /account/i })).toBeVisible();
-    await page.keyboard.press("Control+n");
+    await page.keyboard.press("Control+Shift+O");
     await expect(page.getByText(/what should we build/i)).toBeVisible({
       timeout: 10_000,
     });

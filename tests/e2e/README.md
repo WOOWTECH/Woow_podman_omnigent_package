@@ -13,6 +13,8 @@ npm run install-browsers
 OMNIGENT_BASE_URL=http://127.0.0.1:8000 \
 OMNIGENT_ADMIN_PASSWORD="$(podman secret inspect --showsecret \
     --format '{{.SecretData}}' omnigent-admin-password)" \
+OMNIGENT_CHAT_PASSWORD="$(podman secret inspect --showsecret \
+    --format '{{.SecretData}}' omnigent-runner-password)" \
   npm test
 ```
 
@@ -23,15 +25,30 @@ Environment variables:
 | `OMNIGENT_BASE_URL`        | yes      | —       |
 | `OMNIGENT_ADMIN_PASSWORD`  | yes      | —       |
 | `OMNIGENT_ADMIN_USERNAME`  | no       | `admin` (`OMNIGENT_ADMIN_USERNAME` in `~/.config/omnigent/omnigent.env`) |
+| `OMNIGENT_CHAT_PASSWORD`   | chat spec | Runner owner's password (`omnigent-runner-password` secret) |
+| `OMNIGENT_CHAT_USERNAME`   | no       | `operator` |
 
-The password is the deployment's admin credential: pass it in from the podman secret as
-above, and do not paste it into a shell that records history.
+Pass the admin and runner-owner passwords from their Podman secrets as above;
+do not paste their values into shell history.
+
+Run the chat spec as the runner owner after `podman exec -it omnigent-runner pi login`:
+
+```
+OMNIGENT_BASE_URL=http://127.0.0.1:8000 \
+OMNIGENT_CHAT_PASSWORD="$(podman secret inspect --showsecret \
+    --format '{{.SecretData}}' omnigent-runner-password)" \
+  npx playwright test specs/chat.spec.ts
+```
+
+The model test requires Pi to be enabled on the connected runner. It checks a
+committed `assistant` message in the session API and its rendered text; seeing the
+marker in the user's prompt cannot pass it.
 
 ## Suites
 
 - `specs/smoke.spec.ts` — unauthenticated health/info + login flow
 - `specs/settings.spec.ts` — settings shell (account/appearance/git/shortcuts/members/policies/sharing/archived)
-- `specs/chat.spec.ts` — new session round-trip, harness picker, Ctrl+N (serial)
+- `specs/chat.spec.ts` — operator-owned Pi round-trip, harness picker, Ctrl+Shift+O (serial)
 - `specs/inbox-automations.spec.ts` — inbox empty state + automations New automation modal
 - `specs/rwd.spec.ts` — 375x812 mobile hamburger + 1440x900 desktop shell
 
