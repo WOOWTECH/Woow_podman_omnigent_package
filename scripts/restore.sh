@@ -3,7 +3,7 @@
 #
 #   scripts/restore.sh <backup_dir> [--with-secrets] [--yes]
 #
-#   --with-secrets   also restore the database and admin passwords from secrets.env: the
+#   --with-secrets   also restore the database, admin and operator passwords from secrets.env: the
 #                    role password is applied with ALTER ROLE and both DB secrets are
 #                    replaced, and the admin secret is set to the one that matches the
 #                    password hash in the dump
@@ -101,6 +101,9 @@ if ((with_secrets)); then
   fi
   if [[ -n ${QL_ENV[OMNIGENT_ADMIN_PASSWORD]+x} ]]; then
     ql_secret_ensure omnigent-admin-password env:OMNIGENT_ADMIN_PASSWORD --replace
+  fi
+  if [[ -n ${QL_ENV[OMNIGENT_RUNNER_PASSWORD]+x} ]]; then
+    ql_secret_ensure omnigent-runner-password env:OMNIGENT_RUNNER_PASSWORD --replace
   fi
 fi
 

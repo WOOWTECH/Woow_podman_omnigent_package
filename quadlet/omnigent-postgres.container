@@ -32,6 +32,8 @@ HealthRetries=5
 HealthStartPeriod=60s
 
 NoNewPrivileges=true
+DropCapability=ALL
+AddCapability=CHOWN DAC_OVERRIDE FOWNER SETGID SETUID
 
 [Service]
 # A container stopped by systemd is stopped with SIGTERM: an entrypoint that does not

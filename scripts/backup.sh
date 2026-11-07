@@ -8,7 +8,7 @@
 #   --include-secrets   also write the podman secrets to secrets.env (0600). Needed to
 #                       restore onto another host: the database dump does not carry the
 #                       role password, and the admin password hash in it only matches the
-#                       admin secret of the same moment.
+#                       admin and operator secrets of the same moment.
 #   --stop              stop omnigent-runner and omnigent-server around the volume exports
 #                       and start them again afterwards. Without it the two volumes are
 #                       tarred while their containers write them, which is what podman's
@@ -27,7 +27,7 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 . "$REPO/scripts/lib/quadlet-lib.sh"
 APP=omnigent
 ENV_FILE=$HOME/.config/$APP/$APP.env
-SECRET_VARS=(omnigent-postgres-password:OMNIGENT_POSTGRES_PASSWORD omnigent-admin-password:OMNIGENT_ADMIN_PASSWORD)
+SECRET_VARS=(omnigent-postgres-password:OMNIGENT_POSTGRES_PASSWORD omnigent-admin-password:OMNIGENT_ADMIN_PASSWORD omnigent-runner-password:OMNIGENT_RUNNER_PASSWORD)
 
 # omnigent-server-data and omnigent-pi-data are live working trees (artifacts, git checkouts,
 # pi session state), not a transactional store: --stop is the only way to export them cleanly.
@@ -101,7 +101,7 @@ if ((include_secrets)); then
       fi
     done >"$out/secrets.env"
   )
-  ql_warn "$out/secrets.env holds the database and admin passwords in plain text (0600): keep the backup private"
+  ql_warn "$out/secrets.env holds the database, admin and operator passwords in plain text (0600): keep the backup private"
 fi
 ql_info "backup complete: $out"
 printf '%s\n' "$out"

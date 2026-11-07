@@ -31,6 +31,7 @@ ql_env_load "$ENV_FILE"
 BIND=$(ql_env_get OMNIGENT_BIND)
 PORT=$(ql_env_get OMNIGENT_PORT)
 USER_NAME=$(ql_env_get OMNIGENT_ADMIN_USERNAME)
+RUNNER_USER=$(ql_env_get OMNIGENT_RUNNER_USERNAME)
 PI_STATE=$(ql_env_get OMNIGENT_PI_STATE private)
 BASE=http://$BIND:$PORT
 
@@ -67,11 +68,22 @@ login_ok() {
 }
 check "POST /auth/login as '$USER_NAME' with the omnigent-admin-password secret -> token" login_ok
 
+operator_login_ok() {
+  podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-runner-password 2>/dev/null \
+    | jq -Rn --arg u "$RUNNER_USER" '{username:$u,password:input}' \
+    | curl -s -m 10 -H 'Content-Type: application/json' --data-binary @- "$BASE/auth/login" 2>/dev/null \
+    | jq -e --arg u "$RUNNER_USER" '.user.id == $u and .user.is_admin == false and (.token | length > 0)' >/dev/null 2>&1
+}
+check "operator '$RUNNER_USER' logs in without admin rights" operator_login_ok
+
 # The runner logs in and registers a host on every start; give a fresh start a moment.
 QL_POLL_INTERVAL=5 ql_wait_until 180 "the runner to log in and start its host daemon" \
   runner_log_has 'tailing' >/dev/null 2>&1
 check "runner logged in (stored with a refresh grant)" runner_log_has 'refresh grant stored'
 check "runner host daemon is up (log tail started)" runner_log_has 'tailing'
+runner_env=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-runner 2>/dev/null || true)
+runner_no_admin() { ! grep -qE '^OMNIGENT_(ADMIN|ACCOUNTS_INIT_ADMIN)_' <<<"$runner_env"; }
+check "runner has no admin password or username" runner_no_admin
 
 want_vol=omnigent-pi-data
 [[ $PI_STATE == private ]] || want_vol=pi-agent-data

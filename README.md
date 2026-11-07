@@ -22,8 +22,7 @@ session started from the web UI.
 > must rotate both, now:
 >
 > ```bash
-> scripts/rotate-secrets.sh --all      # new database password; new admin password after you
->                                      # change it in the web UI (Settings -> Account)
+> scripts/rotate-secrets.sh --all      # rotate database, admin and operator passwords
 > ```
 >
 > Treat any other system that used the same strings as exposed too. New installs generate
@@ -39,7 +38,7 @@ session started from the web UI.
 | **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:v0.19.1`, pinned by tag and image digest; no local build |
 | **Database** | Its own `postgres:16.15-alpine3.24` container (digest-pinned) and volume, never published |
 | **Runner** | Always-on sidecar with pi 0.85.1 and the `pi-code` wrapper, wired to `/data/pi-agent`; keeps its own login fresh and restarts its host daemon if it dies |
-| **Secrets** | podman secrets generated at install: database password (file-mounted), `DATABASE_URL`, admin password |
+| **Secrets** | podman secrets generated at install: database password (file-mounted), `DATABASE_URL`, admin password (server only), operator password (runner only) |
 | **Supervision** | `systemd --user` Quadlet units, a real readiness gate on Postgres, a 30 s health-refresh timer |
 
 ---
@@ -74,8 +73,8 @@ scripts/install.sh                       # or: scripts/install.sh --port 18000
 6. creates the podman secrets if they are missing and always re-derives `DATABASE_URL` from
    the database password, so the two cannot drift;
 7. installs only the files that changed and restarts only the units whose files changed;
-8. waits for `/health`, **claims the first admin** through `POST /auth/setup` with the
-   generated password (piped from the secret, never in a command line), waits for both
+8. lets the server pre-seed the admin from `OMNIGENT_ACCOUNTS_INIT_ADMIN_*` before serving
+   requests, then invites and registers a non-admin operator on first boot; waits for both
    containers to be healthy and runs [`tests/smoke.sh`](tests/smoke.sh).
 
 `scripts/install.sh --dry-run` renders and validates everything and reports what it would
@@ -84,11 +83,13 @@ change, without changing anything.
 ### First login
 
 ```bash
-podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password
+podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-runner-password
 ```
 
 Open the web UI (over your tailnet/tunnel, or `ssh -L 8000:127.0.0.1:8000 <host>` and
-<http://localhost:8000>) and log in as the `OMNIGENT_ADMIN_USERNAME` from the env file.
+<http://localhost:8000>) and log in as the `OMNIGENT_RUNNER_USERNAME` from the env file.
+This is the daily non-admin account; the runner uses it too, so its host is visible to you.
+Keep `omnigent-admin-password` for account administration.
 In private pi mode, give the runner its own pi login once:
 
 ```bash
@@ -110,7 +111,7 @@ never printed or put on a command line.
 **A host belongs to the account that registered it.** `GET /v1/hosts` lists only the caller's
 own hosts, and launching on another account's host is a 403 (checked on 0.19.1). Whoever the
 runner logs in as is the only account that sees this runner in the Host picker; today that is
-the account named by `OMNIGENT_ADMIN_USERNAME`. A container that is recreated (every
+the account named by `OMNIGENT_RUNNER_USERNAME`. A container that is recreated (every
 `systemctl --user restart omnigent-runner` does that) registers a new host and leaves the old
 one behind as *offline*.
 
@@ -123,7 +124,8 @@ Edit `~/.config/omnigent/omnigent.env` and re-run `scripts/install.sh`.
 | `OMNIGENT_BIND` | `127.0.0.1` | Publish address; a LAN IP is allowed, `0.0.0.0` is refused. |
 | `OMNIGENT_PORT` | `8000` | Host port of the web UI. |
 | `OMNIGENT_ACCOUNTS_BASE_URL` | *(empty)* | Public/tailnet URL for invite links and OAuth redirects. Empty lets upstream derive it. |
-| `OMNIGENT_ADMIN_USERNAME` | `admin` | The account install.sh claims and the runner logs in with. |
+| `OMNIGENT_ADMIN_USERNAME` | `admin` | Pre-seeded administrator; the runner never receives its password. |
+| `OMNIGENT_RUNNER_USERNAME` | `operator` | Daily non-admin account; the runner logs in as this user. |
 | `OMNIGENT_PI_STATE` | `private` | `private` (own volume) or `shared` (pi-web's `pi-agent-data`). |
 
 ### pi state: private or shared
@@ -157,13 +159,14 @@ anything), then `omnigent-server`, then `omnigent-runner`.
 |---|---|---|
 | `omnigent-postgres-password` | the database role password | `type=mount` + `POSTGRES_PASSWORD_FILE`, so it is not in `podman inspect` |
 | `omnigent-database-url` | `postgresql+psycopg://omnigent:<password>@omnigent-postgres:5432/omnigent` | `type=env DATABASE_URL` on the server |
-| `omnigent-admin-password` | the admin account password | `type=env OMNIGENT_ADMIN_PASSWORD` on the runner |
+| `omnigent-admin-password` | the admin account password | `type=env OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD` on the server |
+| `omnigent-runner-password` | the non-admin operator password | `type=env OMNIGENT_RUNNER_PASSWORD` on the runner |
 
-All three are generated from `/dev/urandom` at install time, created through a pipe (never in
+All four are generated from `/dev/urandom` at install time, created through a pipe (never in
 argv, logs or xtrace) and never overwritten by `install.sh`. The env file holds no passwords.
 
 **Caveat (podman 4.9.3, verified):** a `type=env` secret *is* visible in `podman inspect` of
-the running container, so `DATABASE_URL` and the admin password can be read by anything that
+the running container, so `DATABASE_URL` and the account passwords can be read by anything that
 can use this user's podman socket — including a podman MCP server, if one runs here. They
 stay out of git, the unit files, `systemctl --user cat`, the create command and the journal.
 The database password itself is file-mounted and not exposed that way.
@@ -172,8 +175,9 @@ Rotation:
 
 ```bash
 scripts/rotate-secrets.sh --db       # ALTER ROLE + both database secrets + restart the server
-scripts/rotate-secrets.sh --admin    # after changing the password in the web UI
-scripts/rotate-secrets.sh --all
+scripts/rotate-secrets.sh --admin    # change admin password through the accounts API
+scripts/rotate-secrets.sh --runner   # change operator password and restart the runner
+scripts/rotate-secrets.sh --all      # db + admin + runner; two input lines without a TTY
 ```
 
 ---
@@ -225,7 +229,7 @@ has 3.5a. `OMNIGENT_FEATURES` stays `usage_page,harness_install`, both still val
 
 ```bash
 scripts/backup.sh                     # -> ~/backups/omnigent/<timestamp>/
-scripts/backup.sh --include-secrets   # also the database and admin passwords (secrets.env, 0600)
+scripts/backup.sh --include-secrets   # also database, admin and operator passwords (secrets.env, 0600)
 scripts/backup.sh --stop              # stop the runner and the server around the volume exports
 scripts/restore.sh ~/backups/omnigent/<timestamp> [--with-secrets]
 ```
@@ -289,7 +293,7 @@ was set by `initdb` on the volume being adopted: only a secret holding *that* pa
 `converge.sh` reads it out of the running container and pipes it into `podman secret create` -
 it never reaches argv, the journal or `set -x`. `install.sh` refuses to run when the volume
 exists and the secret does not, on purpose; `converge.sh` is what satisfies that refusal.
-`OMNIGENT_ADMIN_PASSWORD` is adopted the same way, so the runner can still log in. `--check`
+`OMNIGENT_ADMIN_PASSWORD` is adopted the same way, so the server can verify the existing admin. `--check`
 creates those two secrets as well - they are additive podman secrets derived from what is
 already running, and without them `install.sh --dry-run` refuses to render anything, so a
 `--check` that skipped them would validate nothing. It still touches no unit file, no
@@ -399,9 +403,11 @@ systemctl --user restart omnigent-server       # the runner follows through Requ
 - **No plaintext credentials** in the repo, the units or the journal (see Secrets).
 - **`OMNIGENT_AUTH_ENABLED=1`**: the built-in accounts flow. Do not set it to `0` on anything
   reachable beyond this host.
-- **First-boot window**: while the admin roster is empty, `POST /auth/setup` is
-  unauthenticated. install.sh claims the admin within seconds of the server answering
-  `/health`, and the server is on loopback while it happens.
+- **First boot**: the server pre-seeds the admin before it accepts requests, closing the
+  unauthenticated `/auth/setup` window. The runner receives only the non-admin operator secret.
+- **Capabilities**: the server and runner drop all Linux capabilities; Postgres keeps only
+  `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID` and `SETUID` for its entrypoint.
+- **Sharing and grants**: public sharing is off; refresh grants expire after 30 days.
 - **UserNS keep-id** on the runner, so pi's files on the volume stay owned by the host user.
 
 ## Related packages
