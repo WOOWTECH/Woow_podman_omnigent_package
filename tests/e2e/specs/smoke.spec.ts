@@ -88,7 +88,7 @@ test("sidebar shows New session, Automations, Inbox, Settings", async ({
     await expect(
       page.getByRole("link", { name: new RegExp(`^${label}$`, "i") }).or(
         page.getByRole("button", { name: new RegExp(`^${label}$`, "i") }),
-      ),
+      ).first(),
     ).toBeVisible();
   }
 });
