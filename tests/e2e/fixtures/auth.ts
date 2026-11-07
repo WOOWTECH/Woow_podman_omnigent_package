@@ -5,8 +5,8 @@ import os from "node:os";
 
 /**
  * Auth fixture — logs in once per worker, then hands every test an already
- * authenticated `page`. We stash `storageState` on disk (per-worker) so
- * repeated tests reuse the session cookie instead of hammering /login.
+ * authenticated `page`. We stash `storageState` in a private per-worker temp
+ * directory so repeated tests reuse the session cookie without exposing it.
  *
  * The password has NO default: it is the deployment's admin credential and must come from
  * the environment (see tests/e2e/README.md). Read it out of the podman secret, e.g.
@@ -47,18 +47,23 @@ type AuthFixtures = {
 export const test = base.extend<{}, AuthFixtures>({
   storageStatePath: [
     async ({ browser }, use, workerInfo) => {
-      const statePath = path.join(
-        os.tmpdir(),
-        `omnigent-e2e-storage-w${workerInfo.workerIndex}.json`,
-      );
-      if (!fs.existsSync(statePath)) {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `omnigent-e2e-w${workerInfo.workerIndex}-`));
+      fs.chmodSync(stateDir, 0o700);
+      const statePath = path.join(stateDir, "storage.json");
+      try {
         const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
-        const page = await ctx.newPage();
-        await performLogin(page);
-        await ctx.storageState({ path: statePath });
-        await ctx.close();
+        try {
+          const page = await ctx.newPage();
+          await performLogin(page);
+          await ctx.storageState({ path: statePath });
+          fs.chmodSync(statePath, 0o600);
+        } finally {
+          await ctx.close();
+        }
+        await use(statePath);
+      } finally {
+        fs.rmSync(stateDir, { recursive: true, force: true });
       }
-      await use(statePath);
     },
     { scope: "worker" },
   ],

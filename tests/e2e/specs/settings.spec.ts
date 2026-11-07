@@ -34,14 +34,13 @@ test.describe("settings", () => {
     ).toBeVisible();
   });
 
-  test("settings/shortcuts shows Ctrl+N for 'Start a new session'", async ({
+  test("settings/shortcuts shows Ctrl Shift O for 'Start a new session'", async ({
     page,
   }) => {
     await page.goto("/settings/shortcuts");
-    const row = page.getByText(/start a new session/i).first();
+    const row = page.getByRole("listitem").filter({ hasText: /start a new session/i });
     await expect(row).toBeVisible();
-    // Keybinding tokens render as separate spans "Ctrl" + "N" (no literal +).
-    await expect(page.getByText(/ctrl\s*\+?\s*n\b/i).first()).toBeVisible();
+    await expect(row).toContainText(/ctrl\s*shift\s*o\b/i);
   });
 
   test("settings/members shows the admin row and Invite member button", async ({
@@ -92,8 +91,8 @@ test.describe("settings", () => {
     // Radio accessible-names include the full description, e.g.
     //   "On Anyone with manage access can share…"
     // so drop the ^…$ anchors and match the leading token + whitespace.
-    for (const name of [/^on\s/i, /^read only\s/i, /read only \(restricted\)/i, /^off\s/i]) {
-      await expect(page.getByRole("radio", { name })).toBeVisible();
+    for (const value of ["on", "read_only", "restricted_read_only", "off"]) {
+      await expect(page.locator(`input[name="sharing-mode"][value="${value}"]`)).toBeVisible();
     }
   });
 
@@ -106,11 +105,7 @@ test.describe("settings", () => {
     await expect(
       page.getByRole("heading", { name: /archived sessions/i }),
     ).toBeVisible();
-    // Sidebar nav should still be present on the settings shell.
-    await expect(
-      page.getByRole("link", { name: /^settings$/i }).or(
-        page.getByRole("button", { name: /^settings$/i }),
-      ),
-    ).toBeVisible();
+    await expect(page.getByRole("link", { name: /^back$/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /^archived sessions$/i })).toBeVisible();
   });
 });

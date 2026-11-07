@@ -90,10 +90,11 @@ Open the web UI (over your tailnet/tunnel, or `ssh -L 8000:127.0.0.1:8000 <host>
 <http://localhost:8000>) and log in as the `OMNIGENT_RUNNER_USERNAME` from the env file.
 This is the daily non-admin account; the runner uses it too, so its host is visible to you.
 Keep `omnigent-admin-password` for account administration.
-In private pi mode, give the runner its own pi login once:
+In private pi mode, give the runner its own pi login once. Open Pi's
+interactive UI, type `/login`, and follow the provider's authorization flow:
 
 ```bash
-podman exec -it omnigent-runner pi login
+podman exec -it omnigent-runner pi
 ```
 
 ### How the runner signs in
@@ -131,7 +132,7 @@ Edit `~/.config/omnigent/omnigent.env` and re-run `scripts/install.sh`.
 ### pi state: private or shared
 
 - **private** (default): the runner gets `omnigent-pi-data`, a volume this package owns. It
-  needs one `pi login` inside the runner, it is backed up by `scripts/backup.sh`, and
+  needs one interactive `pi` → `/login` inside the runner, it is backed up by `scripts/backup.sh`, and
   `uninstall.sh --purge` deletes it. Nothing is shared with pi-web, so there is no pi
   version skew.
 - **shared** (`--pi-state shared`): the runner mounts **`pi-agent-data`**, the volume owned
