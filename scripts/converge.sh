@@ -137,7 +137,7 @@ adopt_secrets() {
       ql_secret_ensure "$ADMIN_SECRET_NAME" env:CONVERGE_SECRET_VALUE
       ql_info "adopted $ADMIN_SECRET_NAME from omnigent-runner (not printed)"
     else
-      ql_die "omnigent-runner has no OMNIGENT_ADMIN_PASSWORD and the secret $ADMIN_SECRET_NAME does not exist: the runner would not be able to log in after the converge. Create the secret from the admin account's real password first"
+      ql_die "omnigent-runner has no legacy OMNIGENT_ADMIN_PASSWORD and the secret $ADMIN_SECRET_NAME does not exist: the upgraded server could not verify its existing admin. Create the secret from the admin account's real password first"
     fi
   fi
   CONVERGE_SECRET_VALUE=''
@@ -224,7 +224,7 @@ row=$(sed -n 's#^8000/tcp|##p' <<<"$pub" | tr ' ' '\n' | grep -m1 ':') \
 BIND=${row%:*} PORT=${row##*:}
 [[ -n $BIND ]] || BIND=0.0.0.0
 [[ $BIND != 0.0.0.0 ]] \
-  || ql_die "omnigent-server publishes on 0.0.0.0:$PORT; install.sh refuses that (the first visitor to /auth/setup owns the instance). Re-publish on one address first, or pass --set OMNIGENT_BIND=<addr> to install.sh yourself"
+  || ql_die "omnigent-server publishes on 0.0.0.0:$PORT; install.sh refuses that. Re-publish on one address first, or pass --set OMNIGENT_BIND=<addr> to install.sh yourself"
 BASE_URL=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-server | sed -n 's/^OMNIGENT_ACCOUNTS_BASE_URL=//p' | tail -n1)
 ADMIN_USER=$(podman inspect --format '{{range .Config.Env}}{{println .}}{{end}}' omnigent-runner | sed -n 's/^OMNIGENT_ADMIN_USERNAME=//p' | tail -n1)
 ADMIN_USER=${ADMIN_USER:-admin}

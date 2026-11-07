@@ -20,8 +20,7 @@ rootless Podman 三容器組，由 systemd 監管：**Postgres**、上游 **serv
 > 都必須立刻輪替：
 >
 > ```bash
-> scripts/rotate-secrets.sh --all      # 產生新的資料庫密碼；在 Web UI（Settings -> Account）
->                                      # 改完 admin 密碼後再輸入新密碼
+> scripts/rotate-secrets.sh --all      # 輪替資料庫、admin 與操作帳號密碼
 > ```
 >
 > 其他使用相同字串的系統也應視為已外洩。新安裝會自行產生 podman secret，不會把明碼寫到磁碟。
@@ -36,7 +35,7 @@ rootless Podman 三容器組，由 systemd 監管：**Postgres**、上游 **serv
 | **Server** | 上游 `ghcr.io/omnigent-ai/omnigent-server:v0.19.1`，以 tag 加映像 digest 固定，不自行建置 |
 | **Database** | 自己的 `postgres:16.15-alpine3.24` 容器（以 digest 固定）與 volume，永不對外 publish |
 | **Runner** | 常駐 sidecar，內含 pi 0.85.1 與 `pi-code` wrapper，掛在 `/data/pi-agent`；自己維持登入有效，主機常駐程式掛掉時會重新啟動 |
-| **Secrets** | 安裝時產生的 podman secret：資料庫密碼（檔案掛載）、`DATABASE_URL`、admin 密碼 |
+| **Secrets** | 安裝時產生的 podman secret：資料庫密碼（檔案掛載）、`DATABASE_URL`、admin 密碼（僅 server）、操作帳號密碼（僅 runner） |
 | **監管** | `systemd --user` Quadlet 單元、Postgres 真正的就緒 gate、30 秒健康檢查 timer |
 
 ---
@@ -67,8 +66,8 @@ scripts/install.sh                       # 或：scripts/install.sh --port 18000
    禁止），並先拉好固定版本的 server 與 Postgres 映像；
 6. 缺少時建立 podman secret，並且每次都由資料庫密碼重新推導 `DATABASE_URL`，兩者不會不同步；
 7. 只安裝有變更的檔案，只重啟檔案有變更的單元；
-8. 等 `/health`，用產生的密碼透過 `POST /auth/setup` **建立第一個 admin**（密碼由 secret 以
-   pipe 傳入，不會出現在命令列），等兩個容器 healthy，然後執行
+8. server 在對外服務前透過 `OMNIGENT_ACCOUNTS_INIT_ADMIN_*` 建立 admin，接著邀請並註冊非管理員的
+   日常操作帳號；等兩個容器 healthy，然後執行
    [`tests/smoke.sh`](tests/smoke.sh)。
 
 `scripts/install.sh --dry-run` 會渲染並驗證、回報將變更什麼，但不做任何變更。
@@ -76,11 +75,13 @@ scripts/install.sh                       # 或：scripts/install.sh --port 18000
 ### 首次登入
 
 ```bash
-podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password
+podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-runner-password
 ```
 
 透過 tailnet／tunnel 開啟 Web UI（或 `ssh -L 8000:127.0.0.1:8000 <host>` 後開
-<http://localhost:8000>），以 env 檔中的 `OMNIGENT_ADMIN_USERNAME` 登入。private pi 模式下，
+<http://localhost:8000>），以 env 檔中的 `OMNIGENT_RUNNER_USERNAME` 登入。這是日常使用的非管理員
+帳號，runner 也用它登入，因此能看到自己的 host；`omnigent-admin-password` 只供帳號管理使用。
+private pi 模式下，
 替 runner 做一次 pi 登入：
 
 ```bash
@@ -98,7 +99,7 @@ Runner 是一般的 Omnigent *host*。它用和 `omnigent login` 相同的方式
 
 **Host 屬於註冊它的帳號。** `GET /v1/hosts` 只列出呼叫者自己的 host，要在別的帳號的 host 上啟動
 是 403（在 0.19.1 上實測）。Runner 以誰登入，就只有那個帳號能在 Host picker 看到並使用這個
-runner；目前就是 `OMNIGENT_ADMIN_USERNAME` 指定的帳號。容器被重建（每次
+runner；目前就是 `OMNIGENT_RUNNER_USERNAME` 指定的帳號。容器被重建（每次
 `systemctl --user restart omnigent-runner` 都會）會註冊一個新的 host，舊的留下來顯示為 *offline*。
 
 ### 設定
@@ -110,7 +111,8 @@ runner；目前就是 `OMNIGENT_ADMIN_USERNAME` 指定的帳號。容器被重�
 | `OMNIGENT_BIND` | `127.0.0.1` | 發布位址；可用區網 IP，拒絕 `0.0.0.0`。 |
 | `OMNIGENT_PORT` | `8000` | Web UI 的主機埠號。 |
 | `OMNIGENT_ACCOUNTS_BASE_URL` | *（空）* | 邀請連結與 OAuth 轉址用的公開／tailnet URL；留空由上游自行推導。 |
-| `OMNIGENT_ADMIN_USERNAME` | `admin` | install.sh 建立、runner 用來登入的帳號。 |
+| `OMNIGENT_ADMIN_USERNAME` | `admin` | server 預先建立的管理員，runner 不持有其密碼。 |
+| `OMNIGENT_RUNNER_USERNAME` | `operator` | 日常非管理員帳號；runner 以此登入。 |
 | `OMNIGENT_PI_STATE` | `private` | `private`（自己的 volume）或 `shared`（pi-web 的 `pi-agent-data`）。 |
 
 ### pi state：private 或 shared
@@ -142,22 +144,24 @@ runner；目前就是 `OMNIGENT_ADMIN_USERNAME` 指定的帳號。容器被重�
 |---|---|---|
 | `omnigent-postgres-password` | 資料庫角色密碼 | `type=mount` + `POSTGRES_PASSWORD_FILE`，不會出現在 `podman inspect` |
 | `omnigent-database-url` | `postgresql+psycopg://omnigent:<密碼>@omnigent-postgres:5432/omnigent` | server 的 `type=env DATABASE_URL` |
-| `omnigent-admin-password` | admin 帳號密碼 | runner 的 `type=env OMNIGENT_ADMIN_PASSWORD` |
+| `omnigent-admin-password` | admin 帳號密碼 | server 的 `type=env OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD` |
+| `omnigent-runner-password` | 非管理員操作帳號密碼 | runner 的 `type=env OMNIGENT_RUNNER_PASSWORD` |
 
-三者都在安裝時由 `/dev/urandom` 產生，透過 pipe 建立（不經過 argv、log 或 xtrace），
+四者都在安裝時由 `/dev/urandom` 產生，透過 pipe 建立（不經過 argv、log 或 xtrace），
 `install.sh` 不會覆寫既有的值。env 檔裡沒有任何密碼。
 
 **注意（podman 4.9.3，已驗證）**：`type=env` 的 secret 值 *會* 出現在執行中容器的
 `podman inspect`，所以只要能使用這個使用者的 podman socket（例如本機的 podman MCP server），
-就能讀到 `DATABASE_URL` 與 admin 密碼。它們仍然不在 git、單元檔、`systemctl --user cat`、
+就能讀到 `DATABASE_URL` 與帳號密碼。它們仍然不在 git、單元檔、`systemctl --user cat`、
 容器建立指令與 journal 中。資料庫密碼本身以檔案掛載，不受此影響。
 
 輪替：
 
 ```bash
 scripts/rotate-secrets.sh --db       # ALTER ROLE + 兩個資料庫 secret + 重啟 server
-scripts/rotate-secrets.sh --admin    # 在 Web UI 改完密碼之後
-scripts/rotate-secrets.sh --all
+scripts/rotate-secrets.sh --admin    # 經 accounts API 修改 admin 密碼
+scripts/rotate-secrets.sh --runner   # 修改操作帳號密碼並重啟 runner
+scripts/rotate-secrets.sh --all      # db + admin + runner；無 TTY 時輸入兩行密碼
 ```
 
 ---
@@ -263,7 +267,7 @@ scripts/converge.sh --rollback   # 放回先前的單元檔，用舊映像重新
 只有存著**那個**密碼的 secret 才打得開它。`converge.sh` 從執行中的容器讀出來，直接 pipe 進
 `podman secret create`——不經過 argv、journal 或 `set -x`。`install.sh` 在磁碟區存在但 secret 不存在
 時會拒絕執行，這是刻意的；`converge.sh` 正是滿足那個拒絕條件的人。`OMNIGENT_ADMIN_PASSWORD` 也以
-同樣方式收編，runner 才登得進去。`--check` 也會建立這兩個 secret——它們是從已在執行的東西推導出來的
+同樣方式收編，server 才能驗證既有 admin。`--check` 也會建立這兩個 secret——它們是從已在執行的東西推導出來的
 附加式 podman secret，少了它們 `install.sh --dry-run` 什麼都渲染不出來，一個略過這步的 `--check`
 等於什麼都沒驗證。它仍然不會動到任何單元檔、容器或服務。
 
@@ -362,8 +366,10 @@ systemctl --user restart omnigent-server       # runner 會透過 Requires= 一�
 - **映像固定**：server 與 Postgres 以 tag 加 digest 引用，runner 的基底映像以 tag 引用。
 - repo、單元檔與 journal 中 **沒有明碼憑證**（見 Secrets）。
 - **`OMNIGENT_AUTH_ENABLED=1`**：內建帳號流程。任何超出本機可達的部署都不要設成 `0`。
-- **首次開機的空窗**：admin 名冊為空時 `POST /auth/setup` 不需驗證。install.sh 會在 server 回應
-  `/health` 後數秒內建立 admin，而且當下 server 只在 loopback 上。
+- **首次開機**：server 在接受請求前預先建立 admin，關閉未驗證的 `/auth/setup` 空窗；runner 只拿非管理員的操作帳號密碼。
+- **Linux capabilities**：server 與 runner 全部移除；Postgres 只保留 entrypoint 需要的
+  `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID` 與 `SETUID`。
+- **分享與授權**：公開分享關閉；refresh grant 的效期是 30 天。
 - runner 使用 **UserNS keep-id**，讓 volume 上 pi 的檔案維持主機使用者所有。
 
 ## 相關套件

@@ -3,8 +3,7 @@
 #
 # Rendered by scripts/install.sh from ~/.config/omnigent/omnigent.env.
 #
-# - admin password from the podman secret omnigent-admin-password (the username is a
-#   per-host setting); the runner logs in with them on every start
+# - operator password from its own podman secret; no admin credential in this container
 # - pi state: @@OMNIGENT_PI_VOLUME@@, chosen by OMNIGENT_PI_STATE (private =
 #   omnigent-pi.volume, shared = pi-agent-data.volume owned by Woow_podman_pi_agent_package).
 #   The runner gets a real systemd dependency on that volume unit either way.
@@ -18,7 +17,7 @@ After=omnigent-server.service
 [Container]
 ContainerName=omnigent-runner
 # Built by scripts/install.sh from ./Containerfile.runner.
-Image=localhost/woow-omnigent-runner:0.19.1-1
+Image=localhost/woow-omnigent-runner:0.19.1-2
 Pull=never
 Network=omnigent.network
 
@@ -28,8 +27,8 @@ UserNS=keep-id:uid=1000,gid=1000
 Volume=@@OMNIGENT_PI_VOLUME@@:/data/pi-agent
 
 Environment=OMNIGENT_SERVER_URL=http://omnigent-server:8000
-Environment=OMNIGENT_ADMIN_USERNAME=@@OMNIGENT_ADMIN_USERNAME@@
-Secret=omnigent-admin-password,type=env,target=OMNIGENT_ADMIN_PASSWORD
+Environment=OMNIGENT_RUNNER_USERNAME=@@OMNIGENT_RUNNER_USERNAME@@
+Secret=omnigent-runner-password,type=env,target=OMNIGENT_RUNNER_PASSWORD
 
 # Every pi subprocess the runner launches goes through the HOME-rescoping wrapper.
 Environment=OMNIGENT_PI_PATH=/usr/local/bin/pi-code
@@ -38,6 +37,7 @@ Environment=PI_TELEMETRY=0
 Environment=PI_SKIP_VERSION_CHECK=1
 
 NoNewPrivileges=true
+DropCapability=ALL
 
 [Service]
 # A container stopped by systemd is stopped with SIGTERM: an entrypoint that does not

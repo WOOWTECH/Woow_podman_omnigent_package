@@ -29,6 +29,20 @@ for unit in server postgres; do
   fi
 done
 
+# Account isolation and first-boot security must survive later edits to the units.
+server_unit=$REPO/quadlet/omnigent-server.container
+runner_unit=$REPO/quadlet/omnigent-runner.container
+if grep -qF 'Secret=omnigent-admin-password,type=env,target=OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD' "$server_unit" \
+  && grep -qF 'Secret=omnigent-runner-password,type=env,target=OMNIGENT_RUNNER_PASSWORD' "$runner_unit" \
+  && ! grep -qE 'omnigent-admin-password|OMNIGENT_ADMIN_PASSWORD|OMNIGENT_ADMIN_USERNAME' "$runner_unit" \
+  && grep -qF 'Environment=OMNIGENT_PUBLIC_SHARING=0' "$server_unit" \
+  && grep -qF 'DropCapability=ALL' "$server_unit" \
+  && grep -qF 'DropCapability=ALL' "$runner_unit"; then
+  echo 'ok   admin is pre-seeded on the server; the runner holds only its operator credential'
+else
+  local_fail 'admin pre-seeding or runner credential isolation changed'
+fi
+
 # The runner base image must be pinned to an exact version (STANDARD section 3).
 if grep -E '^FROM ' "$REPO/Containerfile.runner" | grep -qvE ':[0-9]+\.[0-9]+\.[0-9]+-'; then
   local_fail "Containerfile.runner has a FROM line without an exact version"

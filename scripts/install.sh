@@ -79,6 +79,9 @@ ql_env_ensure "$EXAMPLE" "$ENV_FILE"
 envsrc=$WORK/$APP.env
 if [[ -f $ENV_FILE ]]; then cp -- "$ENV_FILE" "$envsrc"; else cp -- "$EXAMPLE" "$envsrc"; QL_ENV_CREATED=1; fi
 chmod 600 "$envsrc"
+# Existing 0.12.0 installs have no operator key. Stage the new default before rendering;
+# only the validated staged file is installed, and --dry-run leaves the old file alone.
+grep -q '^OMNIGENT_RUNNER_USERNAME=' "$envsrc" || printf '\nOMNIGENT_RUNNER_USERNAME=operator\n' >>"$envsrc"
 setenv() { QL_DRY_RUN=0 ql_env_set "$envsrc" "$1" "$2"; }
 [[ $QL_ENV_CREATED != 1 ]] || ql_info "created $ENV_FILE with defaults; edit it and re-run to change them"
 for kv in "${sets[@]}"; do
@@ -91,6 +94,7 @@ ql_env_load "$envsrc"
 BIND=$(ql_env_get OMNIGENT_BIND)
 PORT=$(ql_env_get OMNIGENT_PORT)
 USER_NAME=$(ql_env_get OMNIGENT_ADMIN_USERNAME)
+RUNNER_USER=$(ql_env_get OMNIGENT_RUNNER_USERNAME)
 PI_STATE=$(ql_env_get OMNIGENT_PI_STATE private)
 ql_assert_match OMNIGENT_BIND "$BIND" '(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}'
 [[ $BIND != 0.0.0.0 ]] || ql_die "OMNIGENT_BIND=0.0.0.0 would publish the web UI on every network; use 127.0.0.1 or one LAN IP"
@@ -100,6 +104,8 @@ ql_assert_match OMNIGENT_PORT "$PORT" '[1-9][0-9]{0,4}'
 # Rendered into Environment=: Quadlet splits on blanks and systemd would expand "$NAME".
 ql_assert_match OMNIGENT_ACCOUNTS_BASE_URL "$(ql_env_get OMNIGENT_ACCOUNTS_BASE_URL)" '(https?://[^[:space:]"'"'"'\\$]+)?'
 ql_assert_match OMNIGENT_ADMIN_USERNAME "$USER_NAME" '[A-Za-z0-9][A-Za-z0-9._@-]{0,63}'
+ql_assert_match OMNIGENT_RUNNER_USERNAME "$RUNNER_USER" '[a-z0-9][a-z0-9._-]{0,63}'
+[[ $RUNNER_USER != "$USER_NAME" ]] || ql_die 'OMNIGENT_RUNNER_USERNAME must differ from the admin username'
 ql_assert_match OMNIGENT_PI_STATE "$PI_STATE" 'private|shared'
 
 # ---- 3. legacy guards ------------------------------------------------------------------------
@@ -161,6 +167,7 @@ if podman image exists "$RUNNER_IMAGE"; then ql_pull_images "$WORK/out"; fi
 
 ql_secret_ensure omnigent-postgres-password random:32
 ql_secret_ensure omnigent-admin-password random:24
+ql_secret_ensure omnigent-runner-password random:24
 db_url_changed=0
 if podman secret exists omnigent-postgres-password 2>/dev/null; then
   # DATABASE_URL is derived from the password secret on every run, so the two never drift.
@@ -196,40 +203,16 @@ if ((no_start)); then
 fi
 ql_apply_units "$APP" "${UNITS[@]}"
 
-# ---- 7. first-boot admin claim, health and smoke ----------------------------------------------
+# ---- 7. bootstrap confirmation, operator provisioning, health and smoke ----------------------
 BASE=http://$BIND:$PORT
 ql_wait_http "$BASE/health" 200 300 || ql_die "$BASE/health did not answer 200; see: journalctl --user -u omnigent-server -n 100"
 
-# Upstream reports needs_setup=true until POST /auth/setup creates the first admin. Claim it
-# right away with the secret (piped: never in argv or on the terminal); the server is on
-# loopback, so the unauthenticated setup window is this host only, for seconds.
-info=$(curl -s -m 10 "$BASE/v1/info" 2>/dev/null || true)
-# `.needs_setup // "unknown"` would report "unknown" for a literal false: jq's // treats
-# false as empty. Compare explicitly.
-needs=$(jq -r 'if .needs_setup == true then "true" elif .needs_setup == false then "false" else "unknown" end' \
-  <<<"${info:-null}" 2>/dev/null || echo unknown)
-case $needs in
-  false) ql_info "admin already claimed (needs_setup=false)" ;;
-  true)
-    ql_info "first boot (needs_setup=true): claiming admin '$USER_NAME' with the omnigent-admin-password secret"
-    code=$(podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password \
-      | jq -Rn --arg u "$USER_NAME" '{username: $u, password: input}' \
-      | curl -s -o /dev/null -w '%{http_code}' -m 15 -X POST -H 'Content-Type: application/json' \
-        --data @- "$BASE/auth/setup" 2>/dev/null) || code=000
-    case $code in
-      200 | 201) ql_info "admin '$USER_NAME' created" ;;
-      409) ql_info "an admin already exists; nothing to claim" ;;
-      *) ql_die "POST /auth/setup returned HTTP $code; create the admin '$USER_NAME' in the web UI with the password from: podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password" ;;
-    esac
-    ;;
-  *)
-    # Not fatal on its own: tests/smoke.sh below asserts needs_setup=false, so a stack that
-    # really has no admin still fails the install, with a clearer error than this one.
-    ql_warn "cannot read needs_setup from $BASE/v1/info (got: ${info:0:120})"
-    ql_warn "if the web UI asks you to create the first admin, use '$USER_NAME' with the password from:"
-    printf "    podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password\n" >&2
-    ;;
-esac
+# The server consumes INIT_ADMIN before it starts accepting requests. An empty admin roster
+# here is a failed bootstrap: never open the unauthenticated /auth/setup route in this script.
+curl -sS -m 10 "$BASE/v1/info" | jq -e '.needs_setup == false' >/dev/null \
+  || ql_die 'server still needs setup; check the INIT_ADMIN secret and server log'
+BASE=$BASE OMNIGENT_ADMIN_USERNAME=$USER_NAME OMNIGENT_RUNNER_USERNAME=$RUNNER_USER \
+  "$REPO/scripts/provision-operator.sh" || ql_die 'operator provisioning failed'
 
 # podman's transient health timers are not reliable for postgres (see the health service):
 # run the checks actively while waiting.
@@ -247,6 +230,7 @@ $APP $VERSION is installed and healthy.
 
   Web UI       $BASE/   (put a tailnet or tunnel front end on this host in front; README "Tailnet HTTPS")
   Admin        $USER_NAME; password: podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-admin-password
+  Operator     $RUNNER_USER; password: podman secret inspect --showsecret --format '{{.SecretData}}' omnigent-runner-password
   pi           $pi_hint
   Logs         journalctl --user -u omnigent-server -f   |   podman logs -f omnigent-runner
   Settings     $ENV_FILE (edit, then re-run $0)

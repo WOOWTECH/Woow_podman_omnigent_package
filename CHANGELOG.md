@@ -3,6 +3,18 @@
 Versions are `<omnigent version>-<package revision>`, the same string as `VERSION` and the tag
 of the runner image.
 
+## 0.19.1-2 - 2026-11-08
+
+- Pre-seed the administrator inside the server before serving requests. Install no longer
+  calls the unauthenticated `/auth/setup` route.
+- Create a daily non-admin operator through the accounts invite/register API on first boot.
+  The runner logs in as this account and receives only its password secret. An existing
+  operator is checked for matching credentials and non-admin status on every install.
+- Disable public sharing and set refresh-grant lifetime to 30 days. The server and runner
+  drop all Linux capabilities; Postgres retains only the five needed by its entrypoint.
+- Rotate admin and operator passwords through `/auth/users/me/password`; back up and restore
+  the operator secret with the other secrets. Bump the runner image revision.
+
 ## 0.19.1-1 - 2026-11-07
 
 ### Changed
