@@ -67,6 +67,12 @@ until omnigent-runner-login; do
     sleep 10
 done
 
+# Omnigent's picker does not inspect Pi's own auth.json. Its ephemeral config
+# needs a non-secret "use Pi's own login" provider after each container start.
+if [ -x /usr/local/bin/omnigent-runner-configure-pi ]; then
+    /usr/local/bin/omnigent-runner-configure-pi || log "could not configure Pi provider; check runner logs"
+fi
+
 # --- 3. Register as host in the background -----------------------------
 start_host() {
     if ! omnigent host --background --non-interactive --server "${OMNIGENT_SERVER_URL}" 2>&1 | sed 's/^/[omnigent host] /'; then
@@ -110,6 +116,11 @@ while kill -0 "${TAIL_PID}" 2>/dev/null; do
     sleep "${INTERVAL}" &
     wait $! || true
     omnigent-runner-login --ensure || log "could not keep the login fresh (see above); trying again in ${INTERVAL}s"
+    # A user may complete Pi /login after this container started. Pick it up
+    # without requiring another login or replacing the current host daemon.
+    if [ -x /usr/local/bin/omnigent-runner-configure-pi ]; then
+        /usr/local/bin/omnigent-runner-configure-pi || log "could not configure Pi provider; check runner logs"
+    fi
     if ! host_up; then
         log "host daemon is gone; starting it again"
         start_host

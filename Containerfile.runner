@@ -105,8 +105,9 @@ RUN pip3 install --no-cache-dir \
 #   /usr/local/bin/pi-code               — HOME rescoping wrapper
 #   /usr/local/bin/omnigent-runner-loop  — long-lived runner entrypoint
 #   /usr/local/bin/omnigent-runner-login — logs in and keeps the login fresh (refresh grant)
+#   /usr/local/bin/omnigent-runner-configure-pi — restores Pi readiness from its private login
 COPY rootfs/ /
-RUN chmod +x /usr/local/bin/pi-code /usr/local/bin/omnigent-runner-loop /usr/local/bin/omnigent-runner-login \
+RUN chmod +x /usr/local/bin/pi-code /usr/local/bin/omnigent-runner-loop /usr/local/bin/omnigent-runner-login /usr/local/bin/omnigent-runner-configure-pi \
  # Alias /usr/bin/pi to the wrapper. omnigent's native pi integration
  # hardcodes `/usr/bin/pi` in its tmux spawn command line and ignores
  # OMNIGENT_PI_PATH — verified live on the runner, PID 92's argv shows

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Use a ready Pi login as Omnigent's default Pi provider on runner startup.
+
+The Pi credential itself lives in the mounted pi-agent volume. Omnigent's
+picker requires a separate subscription provider entry, while its HOME (and
+config.yaml) is intentionally ephemeral in this runner. Recreate only that
+non-secret entry after a restart; never copy the Pi credential into Omnigent.
+"""
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+import yaml
+
+from omnigent.onboarding.provider_config import default_provider_for_harness
+
+
+def main() -> int:
+    auth_path = Path(os.environ.get("PI_CODING_AGENT_DIR", "/data/pi-agent")) / "auth.json"
+    try:
+        credentials = json.loads(auth_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+    if not isinstance(credentials, dict) or not credentials:
+        return 0
+
+    config_home = Path(os.environ.get("OMNIGENT_CONFIG_HOME") or Path.home() / ".omnigent")
+    config_path = config_home / "config.yaml"
+    try:
+        config = yaml.safe_load(config_path.read_text()) or {}
+    except FileNotFoundError:
+        config = {}
+    if not isinstance(config, dict):
+        raise ValueError(f"{config_path} must contain a mapping")
+    if default_provider_for_harness(config, "pi") is not None:
+        return 0
+
+    # A nonempty auth.json can still contain expired or unusable credentials.
+    # Ask Pi itself before advertising the harness as ready to the web UI.
+    ready = False
+    for provider in credentials:
+        if not isinstance(provider, str) or not provider:
+            continue
+        try:
+            check = subprocess.run(
+                ["pi", "auth", "check", "--provider", provider],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if check.returncode == 0 and check.stdout.strip() == "ready":
+            ready = True
+            break
+    if not ready:
+        return 0
+
+    providers = config.setdefault("providers", {})
+    if not isinstance(providers, dict) or "pi_subscription" in providers:
+        raise ValueError("Cannot add pi_subscription to existing providers mapping")
+    providers["pi_subscription"] = {"kind": "subscription", "cli": "pi", "default": "pi"}
+    config_home.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".config-", dir=config_home)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as out:
+            yaml.safe_dump(config, out, sort_keys=False)
+        os.replace(tmp, config_path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    print("[omnigent-runner-configure-pi] Pi login ready; configured native Pi provider")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
