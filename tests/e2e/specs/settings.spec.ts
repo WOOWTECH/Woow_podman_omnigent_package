@@ -84,16 +84,23 @@ test.describe("settings", () => {
     expect(await entries.count()).toBeGreaterThanOrEqual(20);
   });
 
-  test("settings/sharing shows 4 radios (On/Read only/Read only restricted/Off)", async ({
+  test("settings/sharing offers 4 modes (On/Read only/Read only restricted/Off) and public access is off", async ({
     page,
   }) => {
     await page.goto("/settings/sharing");
-    // Radio accessible-names include the full description, e.g.
-    //   "On Anyone with manage access can share…"
-    // so drop the ^…$ anchors and match the leading token + whitespace.
-    for (const value of ["on", "read_only", "restricted_read_only", "off"]) {
-      await expect(page.locator(`input[name="sharing-mode"][value="${value}"]`)).toBeVisible();
+    // 0.21.0 turned the four radios into a select. Option names include the description,
+    // e.g. "OnAnyone with manage access can share…", so match the leading words only.
+    await page.getByRole("combobox", { name: /session sharing mode/i }).click();
+    const options = page.getByRole("option");
+    for (const mode of [/^on/i, /^read only(?! \()/i, /^read only \(restricted\)/i, /^off/i]) {
+      await expect(options.filter({ hasText: mode })).toHaveCount(1);
     }
+    await page.keyboard.press("Escape");
+    // The package starts the server with OMNIGENT_PUBLIC_SHARING=0.
+    await expect(page.getByRole("switch", { name: /public access/i })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
   });
 
   test("settings/archived lists at least the sidebar structure", async ({

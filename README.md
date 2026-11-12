@@ -2,7 +2,7 @@
 
 [![Podman](https://img.shields.io/badge/Podman-%E2%89%A54.9%20rootless-892CA0)](https://podman.io)
 [![Quadlet](https://img.shields.io/badge/units-Quadlet%20%2B%20systemd-orange)](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
-[![Omnigent](https://img.shields.io/badge/omnigent-0.19.1-blueviolet)](https://github.com/omnigent-ai/omnigent)
+[![Omnigent](https://img.shields.io/badge/omnigent-0.21.0-blueviolet)](https://github.com/omnigent-ai/omnigent)
 [![pi-coding-agent](https://img.shields.io/badge/pi--coding--agent-0.85.1-blue)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -35,7 +35,7 @@ session started from the web UI.
 | | |
 |---|---|
 | **Web UI** | `http://127.0.0.1:8000/` by default; the front door is a tailnet or tunnel on the same host |
-| **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:v0.19.1`, pinned by tag and image digest; no local build |
+| **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:v0.21.0`, pinned by tag and image digest; no local build |
 | **Database** | Its own `postgres:16.15-alpine3.24` container (digest-pinned) and volume, never published |
 | **Runner** | Always-on sidecar with pi 0.85.1 and the `pi-code` wrapper, wired to `/data/pi-agent`; keeps its own login fresh and restarts its host daemon if it dies |
 | **Secrets** | podman secrets generated at install: database password (file-mounted), `DATABASE_URL`, admin password (server only), operator password (runner only) |
@@ -110,9 +110,9 @@ if its process died. The password reaches the runner only as an environment vari
 never printed or put on a command line.
 
 **A host belongs to the account that registered it.** `GET /v1/hosts` lists only the caller's
-own hosts, and launching on another account's host is a 403 (checked on 0.19.1). Whoever the
-runner logs in as is the only account that sees this runner in the Host picker; today that is
-the account named by `OMNIGENT_RUNNER_USERNAME`. A container that is recreated (every
+own hosts, and launching on another account's host is a 403 (checked on 0.19.1 and 0.21.0).
+Whoever the runner logs in as is the only account that sees this runner in the Host picker;
+today that is the account named by `OMNIGENT_RUNNER_USERNAME`. A container that is recreated (every
 `systemctl --user restart omnigent-runner` does that) registers a new host and leaves the old
 one behind as *offline*.
 
@@ -216,6 +216,25 @@ Bumping the server means bumping `Image=` in `quadlet/omnigent-server.container`
 fails when they disagree. The server and Postgres images are written `tag@sha256:<digest>`
 (podman checks the digest and ignores the tag); get the digest of a new tag with
 `skopeo inspect --format '{{.Digest}}' docker://ghcr.io/omnigent-ai/omnigent-server:v<version>`.
+
+### From 0.19.1 to 0.21.0
+
+The server migrates its schema on the first start: five additive revisions (new scheduled-task
+columns and an index, a pull-request field on session metadata) that rewrite no existing row.
+The migration is one-way, so take the dump first (`scripts/upgrade.sh` does). It was rehearsed
+on two throwaway stacks:
+
+- A copy of a live 0.19.1 database (3 users, 16 sessions, 97 session items, 4 hosts,
+  16 agents) came up on 0.21.0 with every count unchanged and no errors in the server log.
+- A 0.19.1 stack seeded with the admin, the operator, a second member, a paused automation and
+  a registered runner: on 0.21.0 all three accounts log in with their old passwords, the
+  automation keeps every field, stays paused and never ran, and gets `session_mode` "new"
+  (each run starts a new session, as before). The 0.21.0 runner registers its host for the
+  operator.
+
+`OMNIGENT_FEATURES` stays `usage_page,harness_install`, both still valid names. pi 0.85.1 still
+meets the 0.84.2 minimum. The 0.21.0 breaking changes (OpenCode 2.0, the desktop app on
+macOS 13+) do not reach this package: the runner offers only pi.
 
 ### From 0.12.0 to 0.19.1
 

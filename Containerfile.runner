@@ -26,7 +26,7 @@ FROM docker.io/library/python:3.12.14-slim-trixie
 # so the RUN steps below actually see the pinned versions instead of an
 # empty string that silently degrades to `pip install omnigent==` (any)
 # and `npm install @earendil-works/pi-coding-agent@` (latest).
-ARG OMNIGENT_VERSION=0.19.1
+ARG OMNIGENT_VERSION=0.21.0
 ARG PI_CODING_AGENT_VERSION=0.85.1
 
 ENV DEBIAN_FRONTEND=noninteractive \
