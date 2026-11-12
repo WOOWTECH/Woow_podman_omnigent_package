@@ -112,9 +112,9 @@ never printed or put on a command line.
 **A host belongs to the account that registered it.** `GET /v1/hosts` lists only the caller's
 own hosts, and launching on another account's host is a 403 (checked on 0.19.1 and 0.21.0).
 Whoever the runner logs in as is the only account that sees this runner in the Host picker;
-today that is the account named by `OMNIGENT_RUNNER_USERNAME`. A container that is recreated (every
-`systemctl --user restart omnigent-runner` does that) registers a new host and leaves the old
-one behind as *offline*.
+today that is the account named by `OMNIGENT_RUNNER_USERNAME`. A container that is recreated
+(every `systemctl --user restart omnigent-runner` does that) registers a new host and leaves
+the old one behind as *offline*.
 
 ### Settings
 
