@@ -3,6 +3,29 @@
 Versions are `<omnigent version>-<package revision>`, the same string as `VERSION` and the tag
 of the runner image.
 
+## 0.21.0-1 - 2026-11-12
+
+### Changed
+
+- **Omnigent 0.19.1 -> 0.21.0**: server image `v0.21.0` (tag and digest), `omnigent==0.21.0` in
+  the runner image. This is the version the WOOW PaaS server and the HA add-on (0.1.20) run.
+  The schema migrates forward on the first start through five additive revisions; take the
+  dump first, there is no way back without it. Rehearsed on a copy of a live 0.19.1 database
+  and on a seeded stack (see README, "From 0.19.1 to 0.21.0").
+- The e2e suite follows the 0.21.0 web UI: it dismisses the "Introducing Automations" tour
+  that opens on a user's first visit, checks the New automation form's Session, Host and
+  Harness fields (they replaced "Runs with"), reads the sharing modes from the select that
+  replaced the radios and checks that public access is off, and picks the sidebar's main
+  "New session" entry now that the Sessions header has a second one.
+
+### Notes
+
+- pi stays at 0.85.1; 0.21.0 still requires 0.84.2 or later. The 0.21.0 breaking changes
+  (OpenCode 2.0, the desktop app on macOS 13+) do not apply: the runner offers only pi.
+- The Pi provider readiness helper (`omnigent-runner-configure-pi`, #10) was merged without a
+  revision bump, so `0.19.1-2` images built before and after it differ. `0.21.0-1` always
+  has it.
+
 ## 0.19.1-2 - 2026-11-08
 
 - Pre-seed the administrator inside the server before serving requests. Install no longer

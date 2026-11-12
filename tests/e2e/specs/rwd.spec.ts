@@ -21,10 +21,13 @@ test.describe("responsive layout", () => {
   }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
+    // 0.21.0 adds a second "New session" icon link to the Sessions header; the first match
+    // is the sidebar's main entry.
     await expect(
       page
         .getByRole("link", { name: /^new session$/i })
-        .or(page.getByRole("button", { name: /^new session$/i })),
+        .or(page.getByRole("button", { name: /^new session$/i }))
+        .first(),
     ).toBeVisible();
     await expect(
       page.getByRole("link", { name: /^automations$/i }),

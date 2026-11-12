@@ -2,7 +2,7 @@
 
 [![Podman](https://img.shields.io/badge/Podman-%E2%89%A54.9%20rootless-892CA0)](https://podman.io)
 [![Quadlet](https://img.shields.io/badge/units-Quadlet%20%2B%20systemd-orange)](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html)
-[![Omnigent](https://img.shields.io/badge/omnigent-0.19.1-blueviolet)](https://github.com/omnigent-ai/omnigent)
+[![Omnigent](https://img.shields.io/badge/omnigent-0.21.0-blueviolet)](https://github.com/omnigent-ai/omnigent)
 [![pi-coding-agent](https://img.shields.io/badge/pi--coding--agent-0.85.1-blue)](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -32,7 +32,7 @@ rootless Podman 三容器組，由 systemd 監管：**Postgres**、上游 **serv
 | | |
 |---|---|
 | **Web UI** | 預設 `http://127.0.0.1:8000/`；對外門面是同一台主機上的 tailnet 或 tunnel |
-| **Server** | 上游 `ghcr.io/omnigent-ai/omnigent-server:v0.19.1`，以 tag 加映像 digest 固定，不自行建置 |
+| **Server** | 上游 `ghcr.io/omnigent-ai/omnigent-server:v0.21.0`，以 tag 加映像 digest 固定，不自行建置 |
 | **Database** | 自己的 `postgres:16.15-alpine3.24` 容器（以 digest 固定）與 volume，永不對外 publish |
 | **Runner** | 常駐 sidecar，內含 pi 0.85.1 與 `pi-code` wrapper，掛在 `/data/pi-agent`；自己維持登入有效，主機常駐程式掛掉時會重新啟動 |
 | **Secrets** | 安裝時產生的 podman secret：資料庫密碼（檔案掛載）、`DATABASE_URL`、admin 密碼（僅 server）、操作帳號密碼（僅 runner） |
@@ -98,7 +98,7 @@ Runner 是一般的 Omnigent *host*。它用和 `omnigent login` 相同的方式
 行程死掉時重新啟動它。密碼只以環境變數交給 runner，不會被印出，也不會出現在命令列。
 
 **Host 屬於註冊它的帳號。** `GET /v1/hosts` 只列出呼叫者自己的 host，要在別的帳號的 host 上啟動
-是 403（在 0.19.1 上實測）。Runner 以誰登入，就只有那個帳號能在 Host picker 看到並使用這個
+是 403（在 0.19.1 與 0.21.0 上實測）。Runner 以誰登入，就只有那個帳號能在 Host picker 看到並使用這個
 runner；目前就是 `OMNIGENT_RUNNER_USERNAME` 指定的帳號。容器被重建（每次
 `systemctl --user restart omnigent-runner` 都會）會註冊一個新的 host，舊的留下來顯示為 *offline*。
 
@@ -196,6 +196,23 @@ scripts/upgrade.sh
 的 `ARG OMNIGENT_VERSION` 與 `VERSION`；三者不一致時 `tests/dryrun.sh` 會失敗。Server 與 Postgres
 映像寫成 `tag@sha256:<digest>`（podman 會驗證 digest、忽略 tag）；新版 tag 的 digest 用
 `skopeo inspect --format '{{.Digest}}' docker://ghcr.io/omnigent-ai/omnigent-server:v<version>` 取得。
+
+### 從 0.19.1 到 0.21.0
+
+Server 第一次啟動時會自動遷移 schema：共五個只做新增的 revision（scheduled task 的新欄位與一個
+index、session metadata 的 pull request 欄位），不改寫任何既有資料列。遷移是單向的，所以要先備份
+（`scripts/upgrade.sh` 會做）。這條路徑已在兩個拋棄式環境演練過：
+
+- 一份正式 0.19.1 資料庫的副本（3 個使用者、16 個 session、97 個 session 項目、4 個 host、
+  16 個 agent），在 0.21.0 上各項數量完全不變，server 日誌沒有錯誤。
+- 一個預先建好 admin、operator、第二個成員、一個暫停中的 automation 與一個已註冊 runner 的
+  0.19.1 環境：換到 0.21.0 後三個帳號都能用原密碼登入；automation 每個欄位都不變、仍是暫停、
+  從未執行，`session_mode` 為 "new"（每次執行都開新的 session，和以前一樣）。0.21.0 的 runner
+  也為 operator 註冊了 host。
+
+`OMNIGENT_FEATURES` 維持 `usage_page,harness_install`，兩個名稱仍然有效。pi 0.85.1 仍符合 0.84.2
+的最低版本。0.21.0 的不相容變更（OpenCode 2.0、桌面版需要 macOS 13 以上）與本套件無關：runner
+只提供 pi。
 
 ### 從 0.12.0 到 0.19.1
 

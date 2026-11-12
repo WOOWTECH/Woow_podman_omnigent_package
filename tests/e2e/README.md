@@ -69,7 +69,9 @@ marker in the user's prompt cannot pass it.
 These tests were generated from a chrome-devtools MCP walk on **2026-08-31** against
 Omnigent **0.11.0** + our runner (pi-native harness) and validated against session
 `0a262a34423647e88330a41377f2a78f` (test prompt `e2e-ultracode-2026`, pi replied via
-GPT-5.6 Sol). The deployment now pins server **v0.19.1**. The smoke, settings,
-automations, inbox, and responsive-layout specs were re-run against a live 0.19.1
-install on 2026-11-08. The chat spec still needs a pi login and a real model
-round-trip.
+GPT-5.6 Sol). The deployment now pins server **v0.21.0**. On 2026-11-12 the smoke,
+settings, automations, inbox, and responsive-layout specs (21 tests), and the chat
+spec's harness-picker and shortcut tests, passed against a throwaway 0.21.0 stack
+migrated from 0.19.1; the automations spec also passed as a user who had never seen
+the automations tour. The chat spec's Pi round-trip needs a pi login and a real model,
+so it runs against the live deployment.
