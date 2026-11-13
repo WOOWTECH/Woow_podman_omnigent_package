@@ -4,6 +4,12 @@ import { test, expect } from "@playwright/test";
 const USERNAME = process.env.OMNIGENT_CHAT_USERNAME ?? "operator";
 
 test.describe.serial("chat as runner owner", () => {
+  // The session the Pi round-trip opened. afterEach archives it whether the test
+  // passed or not (it also runs after a timeout), so runs against the live
+  // deployment leave nothing in the runner owner's session list. Settings >
+  // Archived sessions still lists them.
+  let openedSessionUrl: string | undefined;
+
   test.beforeEach(async ({ page }) => {
     const password = process.env.OMNIGENT_CHAT_PASSWORD;
     if (!password) {
@@ -18,6 +24,15 @@ test.describe.serial("chat as runner owner", () => {
     await expect(page.getByText(/what should we build/i)).toBeVisible({
       timeout: 20_000,
     });
+  });
+
+  test.afterEach(async ({ page }) => {
+    const sessionUrl = openedSessionUrl;
+    openedSessionUrl = undefined;
+    if (!sessionUrl) return;
+    const response = await page.request.patch(sessionUrl, { data: { archived: true } });
+    expect(response.ok(), `Archiving ${sessionUrl} failed: HTTP ${response.status()}`).toBe(true);
+    expect((await response.json()).archived, `${sessionUrl} was not archived`).toBe(true);
   });
 
   test("chat: Pi returns an assistant message through the connected runner", async ({
@@ -51,6 +66,7 @@ test.describe.serial("chat as runner owner", () => {
     const sessionId = new URL(page.url()).pathname.match(/\/c\/([a-f0-9]{32})/)?.[1];
     expect(sessionId, `Expected a session ID in ${page.url()}`).toBeTruthy();
     const sessionUrl = new URL(`/v1/sessions/${sessionId}`, page.url()).toString();
+    openedSessionUrl = sessionUrl;
 
     // The user's own prompt contains marker. A committed assistant item must
     // exist before the rendered answer can satisfy this test.
