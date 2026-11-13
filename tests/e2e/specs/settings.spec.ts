@@ -96,7 +96,8 @@ test.describe("settings", () => {
       await expect(options.filter({ hasText: mode })).toHaveCount(1);
     }
     await page.keyboard.press("Escape");
-    // The package starts the server with OMNIGENT_PUBLIC_SHARING=0.
+    // The package starts the server with OMNIGENT_PUBLIC_SHARING=0. Public access turned on in
+    // this page survives restarts (0.21.0-2 and later), so this fails until it is turned off.
     await expect(page.getByRole("switch", { name: /public access/i })).toHaveAttribute(
       "aria-checked",
       "false",

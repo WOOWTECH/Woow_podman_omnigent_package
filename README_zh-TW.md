@@ -94,7 +94,8 @@ Runner 是一般的 Omnigent *host*。它用和 `omnigent login` 相同的方式
 帶 `issue_refresh`，再以 CLI 自己的 `store_token` 存起來，所以主機常駐程式能用 refresh grant
 換發 access token，不會在 8 小時的 session token 到期後離線。之後 `omnigent-runner-loop` 每
 `OMNIGENT_RUNNER_CHECK_INTERVAL` 秒（預設 60）巡檢一次：refresh grant 達到絕對效期（server 端的
-`OMNIGENT_GRANT_MAX_LIFETIME_DAYS`，預設 30 天）時，用該帳號的密碼 secret 重新登入；常駐程式
+`OMNIGENT_GRANT_MAX_LIFETIME_DAYS`：這裡是 365 天，和 WOOW PaaS server 相同；上游預設 30 天）時，
+用該帳號的密碼 secret 重新登入；常駐程式
 行程死掉時重新啟動它。密碼只以環境變數交給 runner，不會被印出，也不會出現在命令列。
 
 **Host 屬於註冊它的帳號。** `GET /v1/hosts` 只列出呼叫者自己的 host，要在別的帳號的 host 上啟動
@@ -114,6 +115,12 @@ runner；目前就是 `OMNIGENT_RUNNER_USERNAME` 指定的帳號。容器被重�
 | `OMNIGENT_ADMIN_USERNAME` | `admin` | server 預先建立的管理員，runner 不持有其密碼。 |
 | `OMNIGENT_RUNNER_USERNAME` | `operator` | 日常非管理員帳號；runner 以此登入。 |
 | `OMNIGENT_PI_STATE` | `private` | `private`（自己的 volume）或 `shared`（pi-web 的 `pi-agent-data`）。 |
+
+Web UI 的 **設定 → 分享**（僅管理員）可以在執行中覆寫 server 的分享預設值：分享模式、公開存取、
+公開連結最多能做什麼，以及哪些新 session 一開始就公開。每項覆寫是 `/data` 裡的一個小檔案，也就是
+`OMNIGENT_ADMIN_CREDENTIALS_PATH` 所在的目錄（上游沿用的舊名稱，不會寫出任何帳密檔），所以它在
+`omnigent-server-data` volume 上，重啟和升級都會保留，也包含在備份裡。覆寫優先於單元檔的預設值：
+在那裡打開的公開存取會一直開著（即使有 `OMNIGENT_PUBLIC_SHARING=0`），直到在那裡關掉為止。
 
 ### pi state：private 或 shared
 
@@ -386,7 +393,8 @@ systemctl --user restart omnigent-server       # runner 會透過 Requires= 一�
 - **首次開機**：server 在接受請求前預先建立 admin，關閉未驗證的 `/auth/setup` 空窗；runner 只拿非管理員的操作帳號密碼。
 - **Linux capabilities**：server 與 runner 全部移除；Postgres 只保留 entrypoint 需要的
   `CHOWN`、`DAC_OVERRIDE`、`FOWNER`、`SETGID` 與 `SETUID`。
-- **分享與授權**：公開分享關閉；refresh grant 的效期是 30 天。
+- **分享與授權**：公開分享關閉，除非管理員在設定 → 分享打開；refresh grant 在核准後 365 天到期，
+  和 WOOW PaaS server 相同。
 - runner 使用 **UserNS keep-id**，讓 volume 上 pi 的檔案維持主機使用者所有。
 
 ## 相關套件
