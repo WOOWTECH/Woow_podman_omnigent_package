@@ -49,7 +49,8 @@ marker in the user's prompt cannot pass it.
 
 - `specs/smoke.spec.ts` — unauthenticated health/info + login flow
 - `specs/settings.spec.ts` — settings shell (account/appearance/git/shortcuts/members/policies/sharing/archived)
-- `specs/chat.spec.ts` — operator-owned Pi round-trip, harness picker, Ctrl+Shift+O (serial)
+- `specs/chat.spec.ts` — operator-owned Pi round-trip (archives its session), harness picker,
+  Ctrl+Shift+O (serial)
 - `specs/inbox-automations.spec.ts` — inbox empty state + automations New automation modal
 - `specs/rwd.spec.ts` — 375x812 mobile hamburger + 1440x900 desktop shell
 
@@ -60,6 +61,9 @@ marker in the user's prompt cannot pass it.
   in parallel.
 - No mock/fixture data. Tests hit the real server. The `chat.spec.ts` model
   round-trip still requires pi credentials and needs to be validated separately.
+  It archives the session it opened, whether it passed or not, so runs against the
+  live deployment do not pile up in the runner owner's session list; Settings >
+  Archived sessions keeps them.
 - One known-issue marker: `@known-issue omnigent-server-healthcheck-shadowed` on the
   `/healthz` test — the endpoint currently returns SPA HTML instead of JSON; we only
   assert status 200 until the server route is un-shadowed.
@@ -74,4 +78,6 @@ settings, automations, inbox, and responsive-layout specs (21 tests), and the ch
 spec's harness-picker and shortcut tests, passed against a throwaway 0.21.0 stack
 migrated from 0.19.1; the automations spec also passed as a user who had never seen
 the automations tour. The chat spec's Pi round-trip needs a pi login and a real model,
-so it runs against the live deployment.
+so it runs against the live deployment; it passed there on 2026-11-13. The same day all
+24 tests passed on a throwaway 0.21.0 stack whose Pi used a stub OpenAI-compatible
+model, and the round-trip's session ended up archived whether the reply came or not.
