@@ -43,6 +43,16 @@ else
   local_fail 'admin pre-seeding or runner credential isolation changed'
 fi
 
+# Settings > Sharing writes its overrides into the directory of OMNIGENT_ADMIN_CREDENTIALS_PATH.
+# Unless that is on the server volume, a restart silently puts every setting back.
+if grep -qx 'Environment=OMNIGENT_ADMIN_CREDENTIALS_PATH=/data/admin-credentials' "$server_unit" \
+  && grep -qx 'Volume=omnigent-server.volume:/data' "$server_unit" \
+  && grep -qx 'Environment=OMNIGENT_GRANT_MAX_LIFETIME_DAYS=365' "$server_unit"; then
+  echo 'ok   admin settings are kept on the server volume; grants last 365 days as on PaaS'
+else
+  local_fail 'the server data dir is not on omnigent-server-data, or grants do not last 365 days'
+fi
+
 # The runner base image must be pinned to an exact version (STANDARD section 3).
 if grep -E '^FROM ' "$REPO/Containerfile.runner" | grep -qvE ':[0-9]+\.[0-9]+\.[0-9]+-'; then
   local_fail "Containerfile.runner has a FROM line without an exact version"

@@ -3,6 +3,33 @@
 Versions are `<omnigent version>-<package revision>`, the same string as `VERSION` and the tag
 of the runner image.
 
+## 0.21.0-2 - 2026-11-14
+
+### Fixed
+
+- **Settings → Sharing now survives a restart.** The server gets
+  `OMNIGENT_ADMIN_CREDENTIALS_PATH=/data/admin-credentials`, as in upstream's compose file and
+  the HA add-on. Upstream only uses the directory of that path (no credentials file is
+  written): it holds the overrides an admin sets in Settings → Sharing (sharing mode, public
+  access, the most a public link may do, which new sessions start public) and the optional
+  `admins` roster. Without it they went to `/root/.omnigent` in the container, which every
+  restart and upgrade recreates empty, so the page quietly fell back to the unit's defaults.
+  They are now on `omnigent-server-data`, which `scripts/backup.sh` exports.
+
+### Changed
+
+- **Refresh grants last 365 days** (`OMNIGENT_GRANT_MAX_LIFETIME_DAYS`, was 30), the WOOW PaaS
+  value. The runner and `omnigent login` sign in again a year after a grant was approved
+  instead of a month. The limit is checked against each grant's approval time, so it also
+  applies to grants issued before the upgrade.
+
+### Notes
+
+- The upgrade restarts the server once, and the runner for its new image tag. A Settings →
+  Sharing change made before this revision does not survive that restart, as before.
+- An override wins over the unit's default: public access turned on in Settings → Sharing now
+  stays on, and the e2e settings spec fails until it is turned off again.
+
 ## 0.21.0-1 - 2026-11-12
 
 ### Changed

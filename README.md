@@ -105,7 +105,8 @@ daemon renews its access token from a refresh grant instead of dropping offline 
 8 hour session token lapses. `omnigent-runner-loop` then watches over it every
 `OMNIGENT_RUNNER_CHECK_INTERVAL` seconds (60 by default): it logs in again with the account's
 password secret once the refresh grant has reached its absolute lifetime (the server's
-`OMNIGENT_GRANT_MAX_LIFETIME_DAYS`, 30 days by default), and starts the host daemon again
+`OMNIGENT_GRANT_MAX_LIFETIME_DAYS`: 365 days here, as on the WOOW PaaS server; upstream's
+default is 30), and starts the host daemon again
 if its process died. The password reaches the runner only as an environment variable and is
 never printed or put on a command line.
 
@@ -128,6 +129,14 @@ Edit `~/.config/omnigent/omnigent.env` and re-run `scripts/install.sh`.
 | `OMNIGENT_ADMIN_USERNAME` | `admin` | Pre-seeded administrator; the runner never receives its password. |
 | `OMNIGENT_RUNNER_USERNAME` | `operator` | Daily non-admin account; the runner logs in as this user. |
 | `OMNIGENT_PI_STATE` | `private` | `private` (own volume) or `shared` (pi-web's `pi-agent-data`). |
+
+**Settings → Sharing** in the web UI (admins only) overrides the server's sharing defaults
+while it runs: the sharing mode, public access, the most a public link may do, and which new
+sessions start public. Each override is a small file in `/data`, the directory of
+`OMNIGENT_ADMIN_CREDENTIALS_PATH` (an old upstream name; no credentials file is written), so
+it is on the `omnigent-server-data` volume, survives restarts and upgrades, and is in the
+backup. An override wins over the unit's default: public access turned on there stays on
+(despite `OMNIGENT_PUBLIC_SHARING=0`) until it is turned off there again.
 
 ### pi state: private or shared
 
@@ -427,7 +436,8 @@ systemctl --user restart omnigent-server       # the runner follows through Requ
   unauthenticated `/auth/setup` window. The runner receives only the non-admin operator secret.
 - **Capabilities**: the server and runner drop all Linux capabilities; Postgres keeps only
   `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID` and `SETUID` for its entrypoint.
-- **Sharing and grants**: public sharing is off; refresh grants expire after 30 days.
+- **Sharing and grants**: public sharing is off unless an admin turns it on in Settings →
+  Sharing; refresh grants expire 365 days after approval, as on the WOOW PaaS server.
 - **UserNS keep-id** on the runner, so pi's files on the volume stay owned by the host user.
 
 ## Related packages

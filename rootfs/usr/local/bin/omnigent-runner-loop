@@ -12,8 +12,8 @@
 #   4. Stay in the foreground, so podman/systemd sees a live process, and watch over the
 #      runner: tail the host daemon's log (it surfaces in `podman logs -f omnigent-runner`),
 #      renew the login when it can no longer be renewed from its refresh grant (the grant has
-#      an absolute lifetime, OMNIGENT_GRANT_MAX_LIFETIME_DAYS on the server, 30 days by
-#      default), and start the host daemon again if it is gone.
+#      an absolute lifetime, OMNIGENT_GRANT_MAX_LIFETIME_DAYS on the server: 365 days in this
+#      package, 30 by upstream default), and start the host daemon again if it is gone.
 #
 # On a container restart this whole thing runs again — $HOME is baked into the image, not a
 # volume, so the stored login is gone, we log in again and register with a fresh host id.

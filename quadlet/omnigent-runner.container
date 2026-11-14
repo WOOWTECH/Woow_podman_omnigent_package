@@ -17,7 +17,7 @@ After=omnigent-server.service
 [Container]
 ContainerName=omnigent-runner
 # Built by scripts/install.sh from ./Containerfile.runner.
-Image=localhost/woow-omnigent-runner:0.21.0-1
+Image=localhost/woow-omnigent-runner:0.21.0-2
 Pull=never
 Network=omnigent.network
 
