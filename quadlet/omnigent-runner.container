@@ -45,7 +45,8 @@ DropCapability=ALL
 SuccessExitStatus=143
 Restart=always
 RestartSec=10
-TimeoutStartSec=180
+# First rootless UID mapping can exceed five minutes on small x86 hosts.
+TimeoutStartSec=900
 
 [Install]
 WantedBy=default.target
