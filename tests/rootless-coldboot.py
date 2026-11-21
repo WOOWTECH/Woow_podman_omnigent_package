@@ -44,6 +44,14 @@ GUEST_CODES = frozenset({"guest-guard", "guest-guard-runtime", "guest-guard-argu
                          "identity", "poweroff", "boot-identity", "manager-before-owner",
                          "health-before-owner", "timer", "retention", "runtime-receipt"})
 
+INSTALL_FAILURE_CODES = frozenset({"install", "install-timeout", "install-runner-build", "install-render",
+                                   "install-admin-bootstrap", "install-operator", "install-smoke", "install-unit-reload",
+                                   "install-image-pull", "install-unit-start", "install-http-health",
+                                   "install-postgres-health", "install-server-health"})
+INSTALL_SIGNATURES = frozenset({"storage-full", "permission-denied", "dns", "registry-rate-limit",
+                                "network-timeout", "multiple", "unclassified"})
+GUEST_CODES = GUEST_CODES | INSTALL_FAILURE_CODES
+
 GUEST_SSH_EMPTY_STATES = frozenset({"absent", "empty-directory", "empty-authorized-keys"})
 GUEST_SSH_STATES = GUEST_SSH_EMPTY_STATES | {"unavailable", "unsafe-directory", "unexpected-entry",
                                           "unsafe-authorized-keys", "nonempty-authorized-keys"}
@@ -546,10 +554,20 @@ class Controller:
         self.result["ownerSshState"] = ssh_state if isinstance(ssh_state, str) and ssh_state in GUEST_SSH_STATES else "unavailable"
         self.result["ownerSshIsolationVerified"] = (value.get("ownerSshIsolationVerified") is True
                                                    and self.result["ownerSshState"] in GUEST_SSH_EMPTY_STATES)
+        self.result.pop("installerFailure", None)
         if result.returncode != 0 or value.get("ok") is not True:
             code = value.get("failureCode")
-            if code in GUEST_CODES:
+            if isinstance(code, str) and code in GUEST_CODES:
                 self.stage = code
+            diagnostic = value.get("installerFailure")
+            if (isinstance(diagnostic, dict) and isinstance(code, str) and code in INSTALL_FAILURE_CODES
+                    and diagnostic.get("failureCode") == code):
+                exit_code, signature = diagnostic.get("exitCode"), diagnostic.get("signature")
+                if ((exit_code is None and code == "install-timeout"
+                     or type(exit_code) is int and -64 <= exit_code <= 255 and exit_code != 0)
+                        and isinstance(signature, str) and signature in INSTALL_SIGNATURES):
+                    self.result["installerFailure"] = {"failureCode": code, "exitCode": exit_code,
+                                                       "signature": signature}
             raise Failure()
         require(self.result["ownerSshIsolationVerified"])
         return value

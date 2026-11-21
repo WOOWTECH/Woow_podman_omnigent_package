@@ -205,3 +205,18 @@ Primary references: [Ubuntu dated image and checksums](https://cloud-images.ubun
 [NoCloud local images](https://ubuntu.com/docs/public-images/public-images-how-to/use-local-cloud-init-ds/),
 [systemd linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html),
 and [GitHub-hosted runner limitations](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners).
+
+### Installer failure evidence
+
+If the guest installer exits unsuccessfully, its known fatal messages map to fixed
+`install-*` failure codes (render, runner build, image pull, service start/reload,
+HTTP/container health, admin bootstrap, operator provisioning or smoke). Unknown
+messages remain `install`; the 840-second installer deadline reports
+`install-timeout`. `installerFailure` includes only that fixed code, the integer
+exit status (null for timeout), and a fixed error signature: `storage-full`,
+`permission-denied`, `dns`, `registry-rate-limit`, `network-timeout`, `multiple`, or
+`unclassified`. Signatures mean those strings occurred in private output; they do
+not establish a root cause. Unknown fields are discarded at the host boundary.
+Raw stdout/stderr, commands, paths, URLs and exceptions remain private and are
+removed with the owned guest disk. Failure is never retried or converted to a
+coldboot pass. The installer and the two-boot acceptance sequence are unchanged.

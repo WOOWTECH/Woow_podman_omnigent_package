@@ -1048,6 +1048,140 @@ class OwnerSshStateTests(unittest.TestCase):
                 self.assertEqual(guest.inspect_owner_ssh(), state)
 
 
+class InstallerDiagnosticsTests(unittest.TestCase):
+    def test_failed_installer_reports_fixed_build_code_and_keeps_output_private(self):
+        # Exercise the real subprocess boundary without Podman, accounts or a VM.
+        private = "synthetic-private-output"
+        command = [os.sys.executable, "-c",
+                   ("import sys; print(sys.argv[1]); "
+                    "print('install.sh: ERROR: podman build failed; nothing was changed', file=sys.stderr); "
+                    "sys.exit(1)"), private]
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(guest, "ROOT", Path(folder)), mock.patch("sys.stdout", new_callable=io.StringIO) as public:
+            guest.stage("install")
+            with self.assertRaises(guest.Failure):
+                guest.run(command)
+            self.assertEqual(guest.phase, "install-runner-build")
+            self.assertEqual(public.getvalue(), "")
+            self.assertIn(private, (Path(folder) / "private.log").read_text())
+
+
+    def test_known_fatal_messages_map_to_allowlisted_codes_only(self):
+        cases = (
+            ("podman build failed; nothing was changed", "install-runner-build"),
+            ("the rendered units failed the dry-run; nothing was installed", "install-render"),
+            ("server still needs setup; check the INIT_ADMIN secret and server log", "install-admin-bootstrap"),
+            ("operator provisioning failed", "install-operator"),
+            ("tests/smoke.sh failed; see the output above", "install-smoke"),
+            ("systemctl --user daemon-reload failed", "install-unit-reload"),
+            ("podman pull synthetic-private-image failed; nothing was changed", "install-image-pull"),
+            ("start failed; see: journalctl --user -u synthetic-private-unit -n 50", "install-unit-start"),
+            ("restart failed; see: journalctl --user -u synthetic-private-unit -n 50", "install-unit-start"),
+            ("http://127.0.0.1:18000/health did not answer 200; see: journalctl --user -u omnigent-server -n 100", "install-http-health"),
+            ("omnigent-postgres did not become healthy; see: journalctl --user -u omnigent-postgres -n 100", "install-postgres-health"),
+            ("omnigent-server did not become healthy; see: journalctl --user -u omnigent-server -n 100", "install-server-health"),
+            ("synthetic-private-error", "install"),
+        )
+        for message, code in cases:
+            with self.subTest(code=code):
+                value = guest.installer_failure(("install.sh: ERROR: " + message).encode(), 1)
+                self.assertEqual(value, {"failureCode": code, "exitCode": 1, "signature": "unclassified"})
+                self.assertIn(code, host.INSTALL_FAILURE_CODES)
+                self.assertIn(code, host.GUEST_CODES)
+                self.assertNotIn("synthetic-private", json.dumps(value))
+        for prefix in ("", "install.sh: WARNING: ", "foreign.sh: ERROR: "):
+            self.assertEqual(guest.installer_failure((prefix + cases[0][0]).encode(), 1)["failureCode"], "install")
+        unknown_after_known = "install.sh: ERROR: " + cases[0][0] + "\ninstall.sh: ERROR: synthetic-private-error"
+        self.assertEqual(guest.installer_failure(unknown_after_known.encode(), 1)["failureCode"], "install")
+
+    def test_error_signatures_are_fixed_and_multiple_is_ambiguous(self):
+        for raw, signature in ((b"No space left on device", "storage-full"),
+                               (b"Permission denied", "permission-denied"),
+                               (b"Temporary failure resolving", "dns"),
+                               (b"temporary failure in name resolution", "dns"),
+                               (b"Could not resolve host", "dns"),
+                               (b"toomanyrequests", "registry-rate-limit"),
+                               (b"TLS handshake timeout", "network-timeout"),
+                               (b"i/o timeout", "network-timeout"),
+                               (b"No space left on device; Permission denied", "multiple"),
+                               (b"synthetic-private-error", "unclassified")):
+            with self.subTest(signature=signature):
+                value = guest.installer_failure(raw + b" synthetic-private-path", 1)
+                self.assertEqual(value["signature"], signature)
+                self.assertIn(signature, host.INSTALL_SIGNATURES)
+                self.assertNotIn("synthetic-private", json.dumps(value))
+
+    def test_timeout_reports_fixed_code_and_does_not_retry_or_expose_partial_output(self):
+        error = subprocess.TimeoutExpired("synthetic-private-command", 840,
+                                          output=b"synthetic-private-output", stderr=b"Permission denied")
+        with mock.patch.object(guest.subprocess, "run", side_effect=error) as run:
+            guest.stage("install")
+            with self.assertRaises(subprocess.TimeoutExpired):
+                guest.run(["fixture"])
+        run.assert_called_once()
+        self.assertEqual(guest.phase, "install-timeout")
+        self.assertEqual(guest.installer_observation,
+                         {"failureCode": "install-timeout", "exitCode": None, "signature": "permission-denied"})
+
+    def test_only_failed_install_is_classified_and_success_is_unchanged(self):
+        result = mock.Mock(returncode=0, stdout=b"ok\n", stderr=b"install.sh: ERROR: podman build failed; nothing was changed")
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(guest, "ROOT", Path(folder)), mock.patch.object(guest.subprocess, "run", return_value=result), mock.patch.object(guest, "installer_failure") as classify:
+            guest.stage("install")
+            self.assertEqual(guest.run(["fixture"]), "ok")
+            self.assertEqual(guest.phase, "install")
+            result.returncode = 1
+            guest.stage("retention")
+            with self.assertRaises(guest.Failure):
+                guest.run(["fixture"])
+            self.assertEqual(guest.phase, "retention")
+        classify.assert_not_called()
+
+    def test_guest_failure_json_contains_only_sanitized_installer_evidence(self):
+        private = b"synthetic-private-output\ninstall.sh: ERROR: podman build failed; nothing was changed"
+        result = mock.Mock(returncode=1, stdout=private, stderr=b"Permission denied synthetic-private-path")
+        def prepare(*_args):
+            guest.stage("install")
+            guest.run(["fixture"])
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(guest, "ROOT", Path(folder)), mock.patch.object(guest, "guard"), mock.patch.object(guest, "prepare", side_effect=prepare), mock.patch.object(guest.subprocess, "run", return_value=result), mock.patch.object(guest.sys, "argv", ["guest", "prepare", NONCE, HEAD, SOURCE_HASH]), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(guest.main(), 1)
+        value = json.loads(output.getvalue())
+        self.assertEqual(value["failureCode"], "install-runner-build")
+        self.assertEqual(value["installerFailure"], {"failureCode": "install-runner-build", "exitCode": 1,
+                                                     "signature": "permission-denied"})
+        self.assertNotIn("synthetic-private", output.getvalue())
+
+    def test_controller_strips_unknown_fields_and_rejects_invalid_or_stale_diagnostic(self):
+        controller = host.Controller()
+        controller.nonce, controller.head, controller.source_hash = NONCE, HEAD, SOURCE_HASH
+        valid = {"failureCode": "install-runner-build", "exitCode": 1, "signature": "unclassified"}
+        def failed_reply(code, diagnostic):
+            controller.stage = "initial-guest-install"
+            value = {"ok": False, "failureCode": code, "installerFailure": diagnostic,
+                     "ownerSshState": "empty-authorized-keys", "ownerSshIsolationVerified": True}
+            with mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=1, stdout=json.dumps(value))), self.assertRaises(host.Failure):
+                controller.guest("prepare")
+        failed_reply("install-runner-build", {**valid, "private": "synthetic-private-output"})
+        self.assertEqual(controller.result["installerFailure"], valid)
+        self.assertEqual(controller.stage, "install-runner-build")
+        for changes in ({"exitCode": True}, {"exitCode": 0}, {"exitCode": 256}, {"exitCode": None},
+                        {"exitCode": "synthetic-private"}, {"signature": "synthetic-private"},
+                        {"signature": []}, {"failureCode": "install-render"}):
+            controller.result["installerFailure"] = valid
+            failed_reply("install-runner-build", {**valid, **changes})
+            self.assertNotIn("installerFailure", controller.result)
+            self.assertNotIn("synthetic-private", json.dumps(controller.result))
+        for code in ("retention", "synthetic-private", []):
+            failed_reply(code, valid)
+            self.assertNotIn("installerFailure", controller.result)
+        timeout = {"failureCode": "install-timeout", "exitCode": None, "signature": "unclassified"}
+        failed_reply("install-timeout", timeout)
+        self.assertEqual(controller.result["installerFailure"], timeout)
+        reply = {"ok": True, "ownerSshState": "empty-authorized-keys", "ownerSshIsolationVerified": True,
+                 "installerFailure": valid}
+        with mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=0, stdout=json.dumps(reply))):
+            controller.guest("prepare")
+        self.assertNotIn("installerFailure", controller.result)
+
+
 class SourceTests(unittest.TestCase):
     def archive(self, path, name="VERSION"):
         with tarfile.open(path, "w") as archive:

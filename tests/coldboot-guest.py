@@ -31,6 +31,7 @@ UNITS = ("omnigent-postgres.service", "omnigent-server.service", "omnigent-runne
          "omnigent-server-health.timer")
 phase = "guest-guard"
 owner_ssh_observation = "unavailable"
+installer_observation = None
 
 
 class Failure(Exception):
@@ -52,11 +53,63 @@ def hash_file(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def installer_failure(output, returncode):
+    # Match only known fatal messages from the reviewed installer/library. Never
+    # return a substring, command, URL, path or exception from private output.
+    code = "install"
+    fatal = {
+        "podman build failed; nothing was changed": "install-runner-build",
+        "the rendered units failed the dry-run; nothing was installed": "install-render",
+        "server still needs setup; check the INIT_ADMIN secret and server log": "install-admin-bootstrap",
+        "operator provisioning failed": "install-operator",
+        "tests/smoke.sh failed; see the output above": "install-smoke",
+        "systemctl --user daemon-reload failed": "install-unit-reload",
+    }
+    for line in output.decode(errors="replace").splitlines():
+        if not line.startswith("install.sh: ERROR: "):
+            continue
+        message = line.removeprefix("install.sh: ERROR: ")
+        code = fatal.get(message, "install")
+        if message.startswith("podman pull ") and message.endswith(" failed; nothing was changed"):
+            code = "install-image-pull"
+        elif message.startswith(("start failed; see: journalctl --user -u ",
+                                 "restart failed; see: journalctl --user -u ")):
+            code = "install-unit-start"
+        elif message == "http://127.0.0.1:18000/health did not answer 200; see: journalctl --user -u omnigent-server -n 100":
+            code = "install-http-health"
+        elif message == "omnigent-postgres did not become healthy; see: journalctl --user -u omnigent-postgres -n 100":
+            code = "install-postgres-health"
+        elif message == "omnigent-server did not become healthy; see: journalctl --user -u omnigent-server -n 100":
+            code = "install-server-health"
+    # These are observed error signatures, not a root-cause claim. Multiple
+    # signatures remain ambiguous; publish only a fixed vocabulary.
+    signatures = {"storage-full": (b"no space left on device",),
+                  "permission-denied": (b"permission denied",),
+                  "dns": (b"temporary failure resolving", b"temporary failure in name resolution", b"could not resolve host"),
+                  "registry-rate-limit": (b"toomanyrequests",),
+                  "network-timeout": (b"tls handshake timeout", b"i/o timeout",)}
+    lowered = output.lower()
+    matches = [name for name, needles in signatures.items() if any(needle in lowered for needle in needles)]
+    return {"failureCode": code, "exitCode": returncode,
+            "signature": matches[0] if len(matches) == 1 else "multiple" if matches else "unclassified"}
+
+
 def run(args, timeout=60, data=None, cwd=None):
-    result = subprocess.run(args, input=data, capture_output=True, check=False, timeout=timeout, cwd=cwd)
+    global installer_observation
+    try:
+        result = subprocess.run(args, input=data, capture_output=True, check=False, timeout=timeout, cwd=cwd)
+    except subprocess.TimeoutExpired as error:
+        if phase == "install":
+            installer_observation = installer_failure((error.stdout or b"") + b"\n" + (error.stderr or b""), None)
+            installer_observation["failureCode"] = "install-timeout"
+            stage("install-timeout")
+        raise
     if ROOT.is_dir():
         with (ROOT / "private.log").open("ab") as output:
             output.write(result.stdout + result.stderr)
+    if phase == "install" and result.returncode != 0:
+        installer_observation = installer_failure(result.stdout + b"\n" + result.stderr, result.returncode)
+        stage(installer_observation["failureCode"])
     require(result.returncode == 0)
     return result.stdout.decode().strip()
 
@@ -320,8 +373,9 @@ def poweroff(head, source_hash):
 
 
 def main():
-    global owner_ssh_observation
+    global owner_ssh_observation, installer_observation
     owner_ssh_observation = "unavailable"
+    installer_observation = None
     guard_passed = False
     os.umask(0o077)
     try:
@@ -333,8 +387,11 @@ def main():
         guard_passed = True
         value = {"prepare": prepare, "verify": verify, "poweroff": poweroff}[action](head, source_hash)
     except Exception:  # noqa: BLE001 -- public output must never contain credential-bearing errors
-        print(json.dumps({"ok": False, "failureCode": phase, "ownerSshState": owner_ssh_observation,
-                          "ownerSshIsolationVerified": guard_passed}))
+        value = {"ok": False, "failureCode": phase, "ownerSshState": owner_ssh_observation,
+                 "ownerSshIsolationVerified": guard_passed}
+        if installer_observation is not None:
+            value["installerFailure"] = installer_observation
+        print(json.dumps(value))
         return 1
     value.update(ownerSshState=owner_ssh_observation, ownerSshIsolationVerified=guard_passed)
     print(json.dumps(value))
