@@ -479,6 +479,50 @@ run_stage() {
         self.assertIn('omnigent_assert_writers_stopped', shell_function("assert_writers_stopped"))
         self.assertLess(source.index('\nassert_checkouts\n'), source.index('\numask 077'))
 
+
+    def test_shared_cleanup_uses_podman49_options_and_reports_cleanup_failures(self):
+        # Execute the real EXIT handler with inert host doubles. Podman 4.9 volume rm
+        # has no --ignore flag; reject it here exactly as the real CLI does.
+        doubles = r'''systemctl() { return 0; }
+rm() { return 0; }
+podman() {
+  printf '%s\n' "$*" >> "$work/cleanup-commands"
+  if [[ $1 == rm ]]; then return 0; fi
+  if [[ $1 == secret && $2 == exists ]]; then return 1; fi
+  if [[ $1 == volume && $2 == exists ]]; then
+    [[ $3 == pi-agent-data ]] || return 1
+    case $fault in absent) return 1 ;; inspect) return 125 ;; *) return 0 ;; esac
+  fi
+  if [[ $1 == volume && $2 == rm ]]; then
+    [[ " $* " != *' --ignore '* ]] || return 125
+    [[ $fault != remove ]] || return 2
+    [[ $* == 'volume rm pi-agent-data' ]] || return 125
+    return 0
+  fi
+  return 125
+}
+'''
+        command = ('set -euo pipefail\nwork=$1\nREPO=$2\nfault=$3\nreport=$work/result.json\n'
+                   'pi_mode=shared\narch=amd64\nlegacy_head=431759826c6e6ea25579b05051de102699e54229\n'
+                   'OMNIGENT_ROOTLESS_HEAD=1683d217944fc7301be6fa93b82f671e7a7abeaf\n'
+                   'OMNIGENT_ROOTLESS_FAILURE_FILE=$work/failure-code\n'
+                   'phase=complete\nrootless_verified=true\ncompleted=(source-identity)\n' +
+                   doubles + shell_function("read_failure_code") + shell_function("finish") + '\ntrue\nfinish\n')
+        for fault, code in (("none", None), ("absent", None), ("inspect", "cleanup-volume-inspect"),
+                            ("remove", "cleanup-volume")):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                result = subprocess.run(["bash", "-c", command, "fixture", directory, str(REPO), fault],
+                                        capture_output=True, text=True, timeout=5)
+                report = json.loads((Path(directory) / "result.json").read_text())
+                self.assertEqual(result.returncode == 0, code is None, result.stderr)
+                self.assertEqual(report["cleanupComplete"], code is None)
+                self.assertEqual(report["lastStage"], "cleanup" if code else "complete")
+                self.assertEqual(report["failureCode"], code)
+                self.assertEqual(report["status"], "failed" if code else "passed")
+                commands = (Path(directory) / "cleanup-commands").read_text().splitlines()
+                removals = [line for line in commands if line.startswith("volume rm")]
+                self.assertEqual(removals, [] if fault in ("absent", "inspect") else ["volume rm pi-agent-data"])
+
     def test_http_fixture_refuses_external_targets(self):
         with self.assertRaisesRegex(ValueError, "loopback"):
             rootless.request("https://external.invalid/mcp/private_synthetic")

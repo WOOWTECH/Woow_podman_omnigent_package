@@ -75,31 +75,43 @@ read_failure_code() {
   printf '%s' "$code"
 }
 finish() {
-  local rc=$? cleanup_rc=0 failure_code
+  local rc=$? cleanup_rc=0 cleanup_code='' volume_rc=0 failure_code
   failure_code=$(read_failure_code)
   trap - EXIT
   set +e
+  cleanup_failure() { cleanup_rc=1; [[ -n $cleanup_code ]] || cleanup_code=$1; }
   # Only the fresh, named resources this script owns. Never export logs/dumps/secrets.
   systemctl --user stop omnigent-server-health.timer omnigent-runner.service omnigent-server.service omnigent-postgres.service >/dev/null 2>&1
   for container in omnigent-server omnigent-runner omnigent-postgres omnigent-rootless-peer; do
-    podman rm --force --ignore "$container" >/dev/null 2>&1 || cleanup_rc=1
+    podman rm --force --ignore "$container" >/dev/null 2>&1 || cleanup_failure cleanup-container
   done
   if [[ $pi_mode == shared ]]; then
     systemctl --user stop pi-agent-data-volume.service >/dev/null 2>&1
-    podman volume rm --force --ignore pi-agent-data >/dev/null 2>&1 || cleanup_rc=1
-    rm -f -- "$HOME/.config/containers/systemd/pi-agent-data.volume" || cleanup_rc=1
+    # Podman 4.9 volume rm has no --ignore. All owned containers were removed above;
+    # ordinary removal also refuses a volume still held by an unexpected container.
+    podman volume exists pi-agent-data >/dev/null 2>&1 || volume_rc=$?
+    case $volume_rc in
+      0) podman volume rm pi-agent-data >/dev/null 2>&1 || cleanup_failure cleanup-volume ;;
+      1) ;; # Nothing was created, or the owned volume was already removed.
+      *) cleanup_failure cleanup-volume-inspect ;;
+    esac
+    rm -f -- "$HOME/.config/containers/systemd/pi-agent-data.volume" || cleanup_failure cleanup-files
   fi
   for volume in omnigent-server-data omnigent-pi-data omnigent-postgres-data; do
-    if podman volume exists "$volume"; then podman volume rm "$volume" >/dev/null 2>&1 || cleanup_rc=1; fi
+    if podman volume exists "$volume"; then podman volume rm "$volume" >/dev/null 2>&1 || cleanup_failure cleanup-volume; fi
   done
   for secret in omnigent-postgres-password omnigent-database-url omnigent-admin-password omnigent-runner-password; do
-    if podman secret exists "$secret"; then podman secret rm "$secret" >/dev/null 2>&1 || cleanup_rc=1; fi
+    if podman secret exists "$secret"; then podman secret rm "$secret" >/dev/null 2>&1 || cleanup_failure cleanup-secret; fi
   done
-  rm -f -- "$HOME"/.config/containers/systemd/omnigent* "$HOME"/.config/systemd/user/omnigent*
-  systemctl --user daemon-reload >/dev/null 2>&1
-  rm -rf -- "$HOME/.config/omnigent" "$HOME/.local/state/woow-quadlet/omnigent" "$HOME/backups/omnigent"
-  rm -rf -- "$work" "$REPO/tests/e2e/test-results" "$REPO/tests/e2e/playwright-report"
-  ((cleanup_rc == 0)) || rc=1
+  rm -f -- "$HOME"/.config/containers/systemd/omnigent* "$HOME"/.config/systemd/user/omnigent* || cleanup_failure cleanup-files
+  systemctl --user daemon-reload >/dev/null 2>&1 || cleanup_failure cleanup-systemd
+  rm -rf -- "$HOME/.config/omnigent" "$HOME/.local/state/woow-quadlet/omnigent" "$HOME/backups/omnigent" || cleanup_failure cleanup-files
+  rm -rf -- "$work" "$REPO/tests/e2e/test-results" "$REPO/tests/e2e/playwright-report" || cleanup_failure cleanup-files
+  if ((cleanup_rc != 0)); then
+    # Preserve an earlier acceptance failure; otherwise identify cleanup as the failure.
+    if ((rc == 0)); then phase=cleanup; failure_code=$cleanup_code; fi
+    rc=1
+  fi
   python3 - "$report" "$REPO" "$rc" "$phase" "$rootless_verified" "$cleanup_rc" "$failure_code" "$arch" "$pi_mode" "$legacy_head" "$OMNIGENT_ROOTLESS_HEAD" "${completed[@]}" <<'PY'
 import json, pathlib, subprocess, sys
 path, repo, rc, phase, rootless, cleanup, failure_code, arch, mode, legacy, expected, *stages = sys.argv[1:]
