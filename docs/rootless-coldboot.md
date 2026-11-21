@@ -164,6 +164,12 @@ does not prove that QEMU initialized successfully. Tokens, passwords, fixture JS
 keys, serial output, command output and disk images are never uploaded or printed.
 The generated boot identities belong only to this disposable guest.
 
+Guest preflight failures identify the failing guard through fixed
+`guest-guard-*` codes: runtime, arguments, marker file, marker nonce, DMI UUID,
+cloud instance ID, release, owner account, owner home, owner SSH state or controller
+account. The checks remain mandatory before preparation or any package-owner
+command. Values read by those guards and raw exception text are never reported.
+
 Run offline contracts with Python 3.12 (the Ubuntu 24.04 guest runtime):
 
 ```sh

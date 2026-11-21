@@ -34,7 +34,11 @@ GUEST_SCRIPT = "/usr/local/lib/omnigent-coldboot-guest.py"
 QEMU_MACHINE_ARGS = ("qemu-system-x86_64", "-accel", "kvm", "-cpu", "host",
                      "-smp", "2", "-m", "6144")
 KVM_PROBE_STATUSES = frozenset({"passed", "api-rejected", "unknown-error", *errno.errorcode.values()})
-GUEST_CODES = frozenset({"guest-guard", "freshness", "guest-packages", "source", "linger",
+GUEST_CODES = frozenset({"guest-guard", "guest-guard-runtime", "guest-guard-arguments",
+                         "guest-guard-marker", "guest-guard-marker-nonce", "guest-guard-dmi",
+                         "guest-guard-instance", "guest-guard-release", "guest-guard-owner",
+                         "guest-guard-home", "guest-guard-owner-ssh", "guest-guard-controller",
+                         "freshness", "guest-packages", "source", "linger",
                          "install", "initial-health", "prepare-profiles", "initial-smoke",
                          "identity", "poweroff", "boot-identity", "manager-before-owner",
                          "health-before-owner", "timer", "retention", "runtime-receipt"})

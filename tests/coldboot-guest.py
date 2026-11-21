@@ -67,25 +67,39 @@ def root_file(path):
 
 
 def guest_identity_matches(nonce, marker, dmi_uuid, instance_id):
+    stage("guest-guard-marker-nonce")
     require(marker == {"nonce": nonce})
+    stage("guest-guard-dmi")
     require(dmi_uuid.strip().lower() == nonce)
+    stage("guest-guard-instance")
     require(instance_id.strip() == nonce)
 
 
 def guard(nonce, head, source_hash):
+    stage("guest-guard-runtime")
     require(os.geteuid() == 0 and platform.machine() == "x86_64")
+    stage("guest-guard-arguments")
     require(str(uuid.UUID(nonce)) == nonce)
     require(re.fullmatch(r"[0-9a-f]{40}", head) is not None)
     require(re.fullmatch(r"[0-9a-f]{64}", source_hash) is not None)
+    stage("guest-guard-marker")
     root_file(MARKER)
-    guest_identity_matches(nonce, json.loads(MARKER.read_text()),
-                           Path("/sys/class/dmi/id/product_uuid").read_text(),
-                           Path("/var/lib/cloud/data/instance-id").read_text())
+    marker = json.loads(MARKER.read_text())
+    stage("guest-guard-dmi")
+    dmi_uuid = Path("/sys/class/dmi/id/product_uuid").read_text()
+    stage("guest-guard-instance")
+    instance_id = Path("/var/lib/cloud/data/instance-id").read_text()
+    guest_identity_matches(nonce, marker, dmi_uuid, instance_id)
+    stage("guest-guard-release")
     require('VERSION_ID="24.04"' in Path("/etc/os-release").read_text())
+    stage("guest-guard-owner")
     owner = pwd.getpwnam(OWNER)
     require(owner.pw_uid == UID and owner.pw_dir == str(HOME) and owner.pw_shell == "/usr/sbin/nologin")
+    stage("guest-guard-home")
     require(HOME.is_dir() and not HOME.is_symlink() and HOME.stat().st_uid == UID)
+    stage("guest-guard-owner-ssh")
     require(not (HOME / ".ssh").exists())
+    stage("guest-guard-controller")
     require(pwd.getpwnam("coldboot-controller").pw_uid != UID)
 
 
@@ -277,6 +291,7 @@ def poweroff(head, source_hash):
 def main():
     os.umask(0o077)
     try:
+        stage("guest-guard-arguments")
         require(len(sys.argv) == 5)
         action, nonce, head, source_hash = sys.argv[1:]
         require(action in ("prepare", "verify", "poweroff"))

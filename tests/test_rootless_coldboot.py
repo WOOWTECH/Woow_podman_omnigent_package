@@ -839,6 +839,73 @@ class GuestGateTests(unittest.TestCase):
             guest.guard(NONCE, HEAD, SOURCE_HASH)
         run.assert_not_called()
 
+    def guard_fixture(self, change=None):
+        from contextlib import ExitStack
+        change = change or {}
+        contents = {
+            str(guest.MARKER): json.dumps({"nonce": NONCE}),
+            "/sys/class/dmi/id/product_uuid": NONCE,
+            "/var/lib/cloud/data/instance-id": NONCE,
+            "/etc/os-release": 'VERSION_ID="24.04"',
+        }
+        contents.update(change.get("contents", {}))
+        owner = mock.Mock(pw_uid=change.get("owner_uid", guest.UID), pw_dir=str(guest.HOME), pw_shell="/usr/sbin/nologin")
+        controller = mock.Mock(pw_uid=change.get("controller_uid", 1000))
+        patches = [
+            mock.patch.object(guest.os, "geteuid", return_value=change.get("euid", 0)),
+            mock.patch.object(guest.platform, "machine", return_value="x86_64"),
+            mock.patch.object(guest, "root_file", side_effect=change.get("marker_error")),
+            mock.patch.object(guest.Path, "read_text", autospec=True, side_effect=lambda path: contents[str(path)]),
+            mock.patch.object(guest.pwd, "getpwnam", side_effect=lambda name: owner if name == guest.OWNER else controller),
+            mock.patch.object(guest.Path, "is_dir", return_value=change.get("home_dir", True)),
+            mock.patch.object(guest.Path, "is_symlink", return_value=False),
+            mock.patch.object(guest.Path, "stat", return_value=mock.Mock(st_uid=guest.UID)),
+            mock.patch.object(guest.Path, "exists", return_value=change.get("ssh_exists", False)),
+            mock.patch.object(guest.sys, "argv", ["guest", "prepare", change.get("nonce", NONCE), HEAD, SOURCE_HASH]),
+        ]
+        stack = ExitStack()
+        for patch in patches:
+            stack.enter_context(patch)
+        return stack
+
+    def test_guest_guard_valid_fixture_keeps_all_checks(self):
+        with self.guard_fixture(), mock.patch.object(guest, "run") as run:
+            guest.guard(NONCE, HEAD, SOURCE_HASH)
+        run.assert_not_called()
+
+    def test_guest_guard_reports_exact_fixed_gate_without_running_prepare(self):
+        cases = (
+            ({"euid": 1000}, "guest-guard-runtime"),
+            ({"nonce": "private-fixture"}, "guest-guard-arguments"),
+            ({"marker_error": PermissionError("private-fixture")}, "guest-guard-marker"),
+            ({"contents": {str(guest.MARKER): '{}'}}, "guest-guard-marker-nonce"),
+            ({"contents": {"/sys/class/dmi/id/product_uuid": "private-fixture"}}, "guest-guard-dmi"),
+            ({"contents": {"/var/lib/cloud/data/instance-id": "private-fixture"}}, "guest-guard-instance"),
+            ({"contents": {"/etc/os-release": "private-fixture"}}, "guest-guard-release"),
+            ({"owner_uid": 999}, "guest-guard-owner"),
+            ({"home_dir": False}, "guest-guard-home"),
+            ({"ssh_exists": True}, "guest-guard-owner-ssh"),
+            ({"controller_uid": guest.UID}, "guest-guard-controller"),
+        )
+        for change, code in cases:
+            with self.subTest(code=code), self.guard_fixture(change), mock.patch.object(guest, "prepare") as prepare, mock.patch.object(guest, "run") as run, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(guest.main(), 1)
+                self.assertEqual(json.loads(output.getvalue()), {"ok": False, "failureCode": code})
+                self.assertNotIn("private-fixture", output.getvalue())
+                self.assertIn(code, host.GUEST_CODES)
+            prepare.assert_not_called()
+            run.assert_not_called()
+
+    def test_controller_preserves_only_allowlisted_guest_guard_codes(self):
+        controller = host.Controller()
+        controller.nonce, controller.head, controller.source_hash = NONCE, HEAD, SOURCE_HASH
+        for code in ("guest-guard-dmi", "guest-guard-owner-ssh", "private-fixture"):
+            controller.stage = "initial-guest-install"
+            reply = mock.Mock(returncode=1, stdout=json.dumps({"ok": False, "failureCode": code}).encode())
+            with mock.patch.object(controller, "ssh", return_value=reply), self.assertRaises(host.Failure):
+                controller.guest("prepare")
+            self.assertEqual(controller.stage, code if code in host.GUEST_CODES else "initial-guest-install")
+
     def test_nonce_dmi_and_cloud_instance_must_all_match(self):
         guest.guest_identity_matches(NONCE, {"nonce": NONCE}, NONCE.upper(), NONCE + "\n")
         for marker, dmi, instance in (({}, NONCE, NONCE), ({"nonce": NONCE}, "foreign", NONCE),
