@@ -1,12 +1,12 @@
-# omnigent-server: the Omnigent orchestration server and web UI (upstream image).
+# omnigent-server: the WOOW native MCP orchestration server and web UI (generic variant).
 #
 # Rendered by scripts/install.sh from ~/.config/omnigent/omnigent.env (the double-at tokens
 # are listed in quadlet/render-vars). Edit the env file and re-run install.sh; do not edit
 # the installed copy.
 #
-# - pinned to v0.21.0 by tag and by the digest of the multi-arch index (podman checks the
-#   digest and ignores the tag), and to the omnigent CLI version in the runner image: bump
-#   both together, with a database dump first
+# - pinned to the generic WOOW 0.21.0 MCP build by source/run tag and multi-arch digest;
+#   config/server-image.json records the exact producer receipt for both architectures
+# - core/host stay 0.21.0 and Pi stays 0.85.1; take a full checkpoint before upgrading
 # - DATABASE_URL comes from a podman secret derived from the generated DB password
 # - published on 127.0.0.1 by default; the outward door is a tailnet or tunnel front end
 [Unit]
@@ -17,7 +17,7 @@ After=omnigent-postgres.service
 
 [Container]
 ContainerName=omnigent-server
-Image=ghcr.io/omnigent-ai/omnigent-server:v0.21.0@sha256:9bba2964f015ddbb61da0924267effd1801c0db8f44ecec95f401f24d9a3f90c
+Image=ghcr.io/woowtech/omnigent-server-kubernetes:0.21.0-mcp.1-server-sha-459340b0d9516fd3ecb4c35a95eb6e17cc3a5340-run-44896274348-1@sha256:7627b7a4dff2c16cbec16e8b0198b04078cbc0c4f102e44fcdd1b6e77d919f8e
 Network=omnigent.network
 PublishPort=@@OMNIGENT_BIND@@:@@OMNIGENT_PORT@@:8000
 Volume=omnigent-server.volume:/data
@@ -45,6 +45,8 @@ Secret=omnigent-admin-password,type=env,target=OMNIGENT_ACCOUNTS_INIT_ADMIN_PASS
 # Public or tailnet URL used in invite links and OAuth redirects. Empty lets upstream
 # derive it from HOST/PORT, which is fine for loopback-only use.
 Environment=OMNIGENT_ACCOUNTS_BASE_URL=@@OMNIGENT_ACCOUNTS_BASE_URL@@
+# External MCP origin and optional reverse-proxy prefix; never a profile/token URL.
+Environment=OMNIGENT_MCP_PUBLIC_BASE_URL=@@OMNIGENT_MCP_PUBLIC_BASE_URL@@
 
 # /health is JSON; /healthz is swallowed by the SPA catch-all (always 200).
 HealthCmd=curl -sf http://127.0.0.1:8000/health

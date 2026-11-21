@@ -1,0 +1,58 @@
+{
+  "architecture": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "baseImage": "ghcr.io/omnigent-ai/omnigent-server:v0.21.0@sha256:9bba2964f015ddbb61da0924267effd1801c0db8f44ecec95f401f24d9a3f90c",
+  "buildId": "mcp.1",
+  "ci": {
+    "GITHUB_REPOSITORY": "WOOWTECH/omnigent",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_RUN_ID": "44896274348",
+    "GITHUB_SHA": "459340b0d9516fd3ecb4c35a95eb6e17cc3a5340"
+  },
+  "component": "server",
+  "contentManifestSha256": "99eac07289e507dd5b1da7747b2532550dfe97ddaa80e4eae1927b7d2575b96e",
+  "contentSha256": "06d23cbc64f2dd0f8ab86d8cd3d62540a71317ba4797f1b2fd9e0011ec661d89",
+  "coreVersion": "0.21.0",
+  "dependencyLocks": {
+    "deploy/docker/woowtech-wheel-build-requirements.txt": "deb325cea483c62a8f04b85c17c9566ee3139e27437be3a279c3738af19f0d81",
+    "pnpm-lock.yaml": "a8fffd57b41ea3860777daac8f641c9dd19d9ec27989030e95484d3e90529d95",
+    "pnpm-workspace.yaml": "836b62a26e8889f9145ac40988f8e6fbf5b8349a35f007cc3cd7fd9a1cb71748",
+    "uv.lock": "d926898ed1debf1b95302caec43bb3a430134fdec055294f2a2f4f1a55a96c6c"
+  },
+  "image": "ghcr.io/woowtech/omnigent-server-kubernetes@sha256:7627b7a4dff2c16cbec16e8b0198b04078cbc0c4f102e44fcdd1b6e77d919f8e",
+  "imageDigest": "sha256:7627b7a4dff2c16cbec16e8b0198b04078cbc0c4f102e44fcdd1b6e77d919f8e",
+  "migrationHead": "za3b4c5d6e7f",
+  "platforms": [
+    {
+      "architecture": "linux/amd64",
+      "image": "ghcr.io/woowtech/omnigent-server-kubernetes@sha256:9e0d67b47e46569cb2ad908536fba0ee7e69c825deabae69cc2aa2b3d369bd97"
+    },
+    {
+      "architecture": "linux/arm64",
+      "image": "ghcr.io/woowtech/omnigent-server-kubernetes@sha256:7e7c17b82c3dd1d611d01de89a2c3d5c8bcae00769c668466f95d8a88223b1ec"
+    }
+  ],
+  "publishable": true,
+  "runAttempt": "1",
+  "runId": "44896274348",
+  "schemaVersion": 1,
+  "sourceBaseCommit": "459340b0d9516fd3ecb4c35a95eb6e17cc3a5340",
+  "sourceCommit": "459340b0d9516fd3ecb4c35a95eb6e17cc3a5340",
+  "sourceDateEpoch": 1795258133,
+  "sourceTreeSha256": "1f24d09bd5b6914150a82c640e125f4222e84997a52c2732e5a138f6984eb30d",
+  "tag": "ghcr.io/woowtech/omnigent-server-kubernetes:0.21.0-mcp.1-server-sha-459340b0d9516fd3ecb4c35a95eb6e17cc3a5340-run-44896274348-1",
+  "tools": {
+    "node": "v22.23.3",
+    "pnpm": "11.15.1",
+    "python": "3.12.14",
+    "uv": "uv 0.13.4 (x86_64-unknown-linux-gnu)"
+  },
+  "uiSha256": "e77b6a5fcf3e0531a5665d410b6e10a58c92820c94094dace3d9ea1dd8036a3e",
+  "variant": "server",
+  "wheelFilename": "omnigent-0.21.0-py3-none-any.whl",
+  "wheelImage": "ghcr.io/woowtech/omnigent-server-kubernetes@sha256:7627b7a4dff2c16cbec16e8b0198b04078cbc0c4f102e44fcdd1b6e77d919f8e",
+  "wheelPath": "/opt/woow-artifact/omnigent-0.21.0-py3-none-any.whl",
+  "wheelSha256": "734ca85fcfbead7abf940df9ac9670fb70e2189d4ae5195e8b9ba4d9ed7a9087"
+}

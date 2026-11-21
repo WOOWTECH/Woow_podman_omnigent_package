@@ -3,6 +3,26 @@
 Versions are `<omnigent version>-<package revision>`, the same string as `VERSION` and the tag
 of the runner image.
 
+## 0.21.0-3 — Unreleased
+
+- Package native MCP on upstream core/host 0.21.0 with the verified WOOW generic server
+  image from source `459340b`, CI run `44896274348` attempt `1`, and its unchanged receipt.
+- Pass the complete `OMNIGENT_MCP_PUBLIC_BASE_URL` through to the server, including its proxy
+  prefix. Existing env files default to empty. Profile creation returns the canonical URL.
+- Check package revision separately from core version, and verify source commit, wheel/UI
+  hashes, OCI revision and pinned digest against the actual runtime in CI/container smoke.
+- Stop both writers unconditionally before the database dump and volume exports, verify
+  unit/process/job/container state, and resume only previously running or starting units.
+  Failed upgrades restore units and leave writers stopped for full checkpoint restoration.
+- Store secrets losslessly in checksummed private JSON. Validate all required secrets and
+  dump/archive checksums/formats before stopping services or replacing data.
+- Capture installed units/config and refuse restore unless they match the checkpoint,
+  preserving old image pins and private/shared Pi mode. Start the health timer before smoke.
+- Add URL rendering, provenance and lifecycle regression tests, plus an MCP UI/connection/
+  revocation E2E spec with traces/screenshots disabled. Document full migration rollback.
+- Pi remains 0.85.1; host remains 0.21.0 and the existing runner base is retained. Shared Pi
+  state and its owner service remain outside this package's backup/restore operations.
+
 ## 0.21.0-2 - 2026-11-14
 
 ### Fixed
