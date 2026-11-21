@@ -29,6 +29,9 @@ DISK_GIB = 11
 IMAGE_LIMIT = 800 * 1024 ** 2
 REPO = Path(__file__).resolve().parent.parent
 GUEST_SCRIPT = "/usr/local/lib/omnigent-coldboot-guest.py"
+# The same binary/default machine and KVM/CPU/RAM settings serve probe and boot.
+QEMU_MACHINE_ARGS = ("qemu-system-x86_64", "-accel", "kvm", "-cpu", "host",
+                     "-smp", "2", "-m", "6144")
 GUEST_CODES = frozenset({"guest-guard", "freshness", "guest-packages", "source", "linger",
                          "install", "initial-health", "prepare-profiles", "initial-smoke",
                          "identity", "poweroff", "boot-identity", "manager-before-owner",
@@ -113,6 +116,49 @@ def qemu_stderr_diagnostic(stderr):
     return "qemu-early-exit", "QEMU exited before SSH readiness; unrecognized stderr withheld."
 
 
+def qemu_kvm_diagnostics(stderr):
+    # QEMU 8.2 reports a failing operation before its final initialize error.
+    # Match complete C-locale messages; publish only constants from these tables.
+    operations = {
+        "Could not access KVM kernel module": "open",
+        "ioctl(KVM_CREATE_VM) failed": "create-vm",
+        "failed to initialize kvm": "initialize",
+        "Create kernel irqchip failed": "create-irqchip",
+        "Enable kernel irqchip failed": "enable-irqchip",
+    }
+    errors = {
+        "Operation not permitted": (1, "EPERM"),
+        "No such file or directory": (2, "ENOENT"),
+        "Input/output error": (5, "EIO"),
+        "Cannot allocate memory": (12, "ENOMEM"),
+        "Permission denied": (13, "EACCES"),
+        "Device or resource busy": (16, "EBUSY"),
+        "No such device": (19, "ENODEV"),
+        "Invalid argument": (22, "EINVAL"),
+        "Inappropriate ioctl for device": (25, "ENOTTY"),
+        "No space left on device": (28, "ENOSPC"),
+        "Function not implemented": (38, "ENOSYS"),
+        "Operation not supported": (95, "EOPNOTSUPP"),
+    }
+    found = []
+    for line in stderr.decode("utf-8", errors="replace").splitlines():
+        line = line.removeprefix("qemu-system-x86_64: ").removeprefix("-accel kvm: ")
+        for message, operation in operations.items():
+            prefix = message + ": "
+            if not line.startswith(prefix):
+                continue
+            reason = "withheld"
+            for description, (number, name) in errors.items():
+                expected = f"{number} {description}" if operation == "create-vm" else description
+                if line == prefix + expected:
+                    reason = name
+                    break
+            item = {"operation": operation, "errno": reason}
+            if item not in found and len(found) < 8:
+                found.append(item)
+    return found
+
+
 def cloud_config(nonce, client_key, host_private, host_public, guest_script):
     return {
         "users": [
@@ -141,6 +187,7 @@ class Controller:
         self.work = None
         self.report_parent = None
         self.proc = None
+        self.probe_proc = None
         self.acl = None
         self.completed = []
         self.deadline = time.monotonic() + 36 * 60
@@ -211,6 +258,46 @@ class Controller:
         kvm_probe()
         self.result["kvmCreateVmVerified"] = True
         self.done()
+        self.probe_qemu_kvm()
+
+    def stop_qemu_probe(self):
+        # This handle belongs only to the image-free probe, never the real guest.
+        if self.probe_proc is None:
+            return
+        if self.probe_proc.poll() is None:
+            self.probe_proc.terminate()
+        try:
+            self.probe_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.probe_proc.kill()
+            self.probe_proc.wait(timeout=5)
+        require(self.probe_proc.poll() is not None)
+        self.probe_proc = None
+
+    def probe_qemu_kvm(self):
+        validate_owned(self.work, self.parent, self.nonce, self.identity)
+        require(self.proc is None and self.probe_proc is None)
+        require(self.deadline - time.monotonic() >= 3)
+        self.stage_start("qemu-kvm-probe")
+        # Paused CPU, no disks/default devices/network, before any image download.
+        args = [*QEMU_MACHINE_ARGS, "-S", "-nodefaults", "-nic", "none",
+                "-display", "none", "-monitor", "none", "-serial", "none"]
+        try:
+            with (self.work / "qemu-probe.stderr").open("wb") as output:
+                self.probe_proc = subprocess.Popen(args, stdin=subprocess.DEVNULL,
+                                                   stdout=subprocess.DEVNULL, stderr=output,
+                                                   env={**os.environ, "LC_ALL": "C"})
+            try:
+                exit_code = self.probe_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                exit_code = self.probe_proc.poll()
+            if exit_code is not None:
+                self.record_qemu_exit(exit_code, probe=True)
+                raise Failure()
+        finally:
+            self.stop_qemu_probe()
+        self.result["qemuKvmProbeVerified"] = True
+        self.done()
 
     def prepare(self):
         self.stage_start("verified-image-and-source")
@@ -262,15 +349,16 @@ class Controller:
                          "-o", "ServerAliveCountMax=2", "coldboot-controller@127.0.0.1", shlex.join(args)],
                         timeout=timeout, data=data, check=check)
 
-    def record_qemu_exit(self, exit_code):
+    def record_qemu_exit(self, exit_code, *, probe=False):
         try:
-            with (self.work / "qemu.stderr").open("rb") as stream:
+            with (self.work / ("qemu-probe.stderr" if probe else "qemu.stderr")).open("rb") as stream:
                 stderr = stream.read(64 * 1024)
         except OSError:
             stderr = b""
         code, summary = qemu_stderr_diagnostic(stderr)
         self.result.update(qemuExitCode=exit_code, qemuFailureStage=self.stage,
-                           qemuStderrSummary=summary)
+                           qemuStderrSummary=summary,
+                           qemuKvmDiagnostics=qemu_kvm_diagnostics(stderr))
         self.stage = code
 
     def boot(self):
@@ -280,7 +368,7 @@ class Controller:
         require(not self.disk.is_symlink() and not self.base.is_symlink())
         require(shutil.disk_usage(self.work).free >= GIB // 2)
         # New process on each invocation; never -snapshot, TCG, or an external disk.
-        args = ["qemu-system-x86_64", "-accel", "kvm", "-cpu", "host", "-smp", "2", "-m", "6144",
+        args = [*QEMU_MACHINE_ARGS,
                 "-uuid", self.nonce, "-display", "none", "-monitor", "none", "-no-reboot",
                 "-serial", "file:" + str(self.work / "serial.log"),
                 "-drive", f"file={self.disk},format=qcow2,if=virtio",
@@ -291,7 +379,8 @@ class Controller:
         # Reset per-boot stderr so a previous boot's warning cannot mask this exit.
         # The guest serial stream remains a separate private file.
         with (self.work / "qemu.stderr").open("wb") as output:
-            self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=output)
+            self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=output,
+                                         env={**os.environ, "LC_ALL": "C"})
         deadline = min(time.monotonic() + 240, self.deadline)
         while time.monotonic() < deadline:
             exit_code = self.proc.poll()
@@ -355,6 +444,10 @@ class Controller:
         # Best effort for each owned resource, but any failure prevents a passing receipt.
         failed = []
         try:
+            self.stop_qemu_probe()
+        except (Failure, OSError, subprocess.SubprocessError):
+            failed.append("cleanup-qemu-probe")
+        try:
             if self.proc is not None and self.proc.poll() is None:
                 self.proc.terminate()
                 try:
@@ -373,6 +466,7 @@ class Controller:
         try:
             if self.work is not None:
                 require(self.proc is None or self.proc.poll() is not None)
+                require(self.probe_proc is None or self.probe_proc.poll() is not None)
                 validate_owned(self.work, self.parent, self.nonce, self.identity)
                 shutil.rmtree(self.work)
                 require(not self.work.exists())

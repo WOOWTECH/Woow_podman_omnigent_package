@@ -71,6 +71,15 @@ physical-host coldboot remains a separate deployment acceptance criterion.
   with an ACL, then requires KVM API version 12 and a successful `KVM_CREATE_VM`
   ioctl. Lack of group membership alone must not cause a false failure. Missing
   KVM, a rejected ioctl or unavailable resources fails closed: no TCG fallback.
+- Immediately after that ioctl, before downloading the image, an owned QEMU
+  process must remain alive for three seconds with the same binary/default
+  machine, KVM accelerator, host CPU, two vCPUs and 6 GiB RAM as the real boot.
+  This probe uses `-S`, no default devices, no images and no network. Its separate
+  process handle is terminated and reaped before preparation continues (five
+  seconds for termination, then five seconds after a forced kill if needed).
+  Early exit uses the same safe operation/errno diagnostics. A passing
+  `qemuKvmProbeVerified` proves only this startup probe, never guest coldboot or
+  retention. The full guest poweroff/new-process/retention checks remain required.
 
 ## Resource and time bounds
 
@@ -97,8 +106,12 @@ completed stages, boot IDs plus hashed machine ID, explicit proof booleans,
 static failure codes and cleanup outcome. An early QEMU exit records its numeric
 exit status and an allowlisted fixed diagnostic summary from QEMU stderr. Unknown
 stderr stays withheld; the guest serial/cloud-init stream is never a diagnostic
-source. Tokens, passwords, fixture JSON, keys, serial output, command output and
-disk images are never uploaded or printed.
+source. KVM failures additionally record fixed operation names and errno symbols
+matched against complete known C-locale messages. This distinguishes opening the
+device, creating a VM, IRQ-chip setup and final initialization without copying
+stderr text. An unknown reason is `withheld`; a successful preflight ioctl alone
+does not prove that QEMU initialized successfully. Tokens, passwords, fixture JSON,
+keys, serial output, command output and disk images are never uploaded or printed.
 The generated boot identities belong only to this disposable guest.
 
 Run offline contracts with Python 3.12 (the Ubuntu 24.04 guest runtime):

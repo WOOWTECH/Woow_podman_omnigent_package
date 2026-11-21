@@ -204,6 +204,169 @@ class KvmAndTransportTests(unittest.TestCase):
 
 
 class BootDiagnosticsTests(unittest.TestCase):
+    def test_qemu_probe_uses_boot_machine_without_images_or_network(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            probe = mock.Mock(poll=mock.Mock(side_effect=[None, None, 0]))
+            probe.wait.side_effect = [subprocess.TimeoutExpired("qemu", 3), 0]
+            with mock.patch.object(host.subprocess, "Popen", return_value=probe) as launch, mock.patch("builtins.print"):
+                controller.probe_qemu_kvm()
+            args = launch.call_args.args[0]
+            self.assertEqual(args[:len(host.QEMU_MACHINE_ARGS)], list(host.QEMU_MACHINE_ARGS))
+            for flag in ("-S", "-nodefaults"):
+                self.assertIn(flag, args)
+            self.assertEqual(args[args.index("-nic") + 1], "none")
+            for flag in ("-drive", "-blockdev", "-netdev", "-kernel", "-initrd"):
+                self.assertNotIn(flag, args)
+            self.assertEqual(launch.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertTrue(launch.call_args.kwargs["stderr"].name.endswith("qemu-probe.stderr"))
+            self.assertEqual(launch.call_args.kwargs["env"]["LC_ALL"], "C")
+            self.assertEqual(probe.wait.call_args_list, [mock.call(timeout=3), mock.call(timeout=5)])
+            probe.terminate.assert_called_once_with()
+            probe.kill.assert_not_called()
+            self.assertIsNone(controller.proc)
+            self.assertIsNone(controller.probe_proc)
+            self.assertTrue(controller.result["qemuKvmProbeVerified"])
+            self.assertEqual(controller.result["status"], "failed")
+            self.assertEqual(controller.completed, ["qemu-kvm-probe"])
+
+    def test_qemu_probe_early_exit_reports_reason_before_download(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            probe = mock.Mock(poll=mock.Mock(return_value=1), wait=mock.Mock(return_value=1))
+            def launch_probe(_args, **kwargs):
+                kwargs["stderr"].write(b"Could not access KVM kernel module: Permission denied\nprivate-fixture-token\n")
+                kwargs["stderr"].flush()
+                return probe
+            with mock.patch.object(host.subprocess, "Popen", side_effect=launch_probe), mock.patch.object(controller, "preflight", side_effect=controller.probe_qemu_kvm), mock.patch.object(controller, "prepare") as prepare, mock.patch.object(controller, "boot") as boot, mock.patch("builtins.print"), self.assertRaises(host.Failure):
+                controller.acceptance()
+            prepare.assert_not_called()
+            boot.assert_not_called()
+            probe.terminate.assert_not_called()
+            self.assertEqual(probe.wait.call_args_list, [mock.call(timeout=3), mock.call(timeout=5)])
+            self.assertEqual(controller.result["qemuFailureStage"], "qemu-kvm-probe")
+            self.assertEqual(controller.result["qemuKvmDiagnostics"], [{"operation": "open", "errno": "EACCES"}])
+            self.assertEqual(controller.result["qemuExitCode"], 1)
+            self.assertNotIn("private-fixture", json.dumps(controller.result))
+            self.assertNotIn("qemuKvmProbeVerified", controller.result)
+            self.assertIsNone(controller.proc)
+            self.assertIsNone(controller.probe_proc)
+
+    def test_qemu_probe_refuses_foreign_directory_and_existing_processes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            marker = controller.work / "owner.json"
+            original = marker.read_text()
+            marker.write_text("{}")
+            with mock.patch.object(host.subprocess, "Popen") as launch, self.assertRaises(host.Failure):
+                controller.probe_qemu_kvm()
+            launch.assert_not_called()
+            marker.write_text(original)
+            for attr in ("proc", "probe_proc"):
+                process = mock.Mock()
+                setattr(controller, attr, process)
+                with mock.patch.object(host.subprocess, "Popen") as launch, self.assertRaises(host.Failure):
+                    controller.probe_qemu_kvm()
+                launch.assert_not_called()
+                process.terminate.assert_not_called()
+                process.kill.assert_not_called()
+                setattr(controller, attr, None)
+
+    def test_qemu_probe_kills_only_owned_handle_when_termination_times_out(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            probe = mock.Mock(poll=mock.Mock(side_effect=[None, None, -9]))
+            probe.wait.side_effect = [subprocess.TimeoutExpired("qemu", 3), subprocess.TimeoutExpired("qemu", 5), -9]
+            with mock.patch.object(host.subprocess, "Popen", return_value=probe), mock.patch("builtins.print"):
+                controller.probe_qemu_kvm()
+            probe.terminate.assert_called_once_with()
+            probe.kill.assert_called_once_with()
+            self.assertEqual(probe.wait.call_args_list, [mock.call(timeout=3), mock.call(timeout=5), mock.call(timeout=5)])
+            self.assertIsNone(controller.probe_proc)
+
+    def test_qemu_probe_exit_at_alive_check_is_not_a_pass(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            probe = mock.Mock(poll=mock.Mock(return_value=0))
+            probe.wait.side_effect = [subprocess.TimeoutExpired("qemu", 3), 0]
+            with mock.patch.object(host.subprocess, "Popen", return_value=probe), mock.patch("builtins.print"), self.assertRaises(host.Failure):
+                controller.probe_qemu_kvm()
+            self.assertEqual(controller.result["qemuExitCode"], 0)
+            self.assertNotIn("qemuKvmProbeVerified", controller.result)
+            self.assertEqual(controller.completed, [])
+            probe.terminate.assert_not_called()
+
+    def test_qemu_probe_stop_failure_keeps_handle_and_prevents_pass(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            probe = mock.Mock(poll=mock.Mock(return_value=None))
+            probe.wait.side_effect = subprocess.TimeoutExpired("qemu", 5)
+            with mock.patch.object(host.subprocess, "Popen", return_value=probe), mock.patch("builtins.print"), self.assertRaises(subprocess.TimeoutExpired):
+                controller.probe_qemu_kvm()
+            self.assertIs(controller.probe_proc, probe)
+            self.assertNotIn("qemuKvmProbeVerified", controller.result)
+            self.assertEqual(controller.completed, [])
+            self.assertIsNone(controller.proc)
+
+    def test_live_probe_prevents_workdir_cleanup_and_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            controller.probe_proc = mock.Mock(poll=mock.Mock(return_value=None))
+            controller.probe_proc.wait.side_effect = subprocess.TimeoutExpired("qemu", 5)
+            with self.assertRaises(host.Failure):
+                controller.cleanup()
+            self.assertTrue(controller.work.exists())
+            self.assertIn("cleanup-qemu-probe", controller.result["cleanupFailureCodes"])
+            self.assertIn("cleanup-files", controller.result["cleanupFailureCodes"])
+            self.assertNotIn("qemuKvmProbeVerified", controller.result)
+
+    def test_probe_is_after_ioctl_and_before_image_preparation(self):
+        source = (ROOT / "tests/rootless-coldboot.py").read_text()
+        preflight = source[source.index("    def preflight"):source.index("    def prepare")]
+        self.assertLess(preflight.index("kvm_probe()"), preflight.index("self.probe_qemu_kvm()"))
+        acceptance = source[source.index("    def acceptance"):source.index("    def cleanup")]
+        self.assertLess(acceptance.index("self.preflight()"), acceptance.index("self.prepare()"))
+
+    def test_kvm_diagnostics_preserve_operation_and_errno_as_fixed_values(self):
+        cases = (
+            (b"Could not access KVM kernel module: Permission denied", "open", "EACCES"),
+            (b"ioctl(KVM_CREATE_VM) failed: 16 Device or resource busy", "create-vm", "EBUSY"),
+            (b"qemu-system-x86_64: failed to initialize kvm: Invalid argument", "initialize", "EINVAL"),
+            (b"Create kernel irqchip failed: No space left on device", "create-irqchip", "ENOSPC"),
+            (b"Enable kernel irqchip failed: Operation not permitted", "enable-irqchip", "EPERM"),
+        )
+        for line, operation, error in cases:
+            with self.subTest(operation=operation):
+                self.assertEqual(host.qemu_kvm_diagnostics(line), [{"operation": operation, "errno": error}])
+
+    def test_kvm_diagnostics_unknown_text_never_escapes(self):
+        for line in (
+            b"Could not access KVM kernel module: private-fixture-token",
+            b"qemu-system-x86_64: failed to initialize kvm: Permission denied private-fixture-token",
+            b"private-fixture-token Permission denied",
+            b"ioctl(KVM_CREATE_VM) failed: 99 Permission denied",
+        ):
+            with self.subTest(line=line):
+                value = host.qemu_kvm_diagnostics(line)
+                self.assertNotIn("private-fixture", json.dumps(value))
+                self.assertNotIn("EACCES", json.dumps(value))
+
+    def test_kvm_exit_receipt_retains_multiple_fixed_diagnostics(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            controller.stage = "initial-guest-install"
+            (controller.work / "qemu.stderr").write_bytes(
+                b"Could not access KVM kernel module: Permission denied\n"
+                b"qemu-system-x86_64: failed to initialize kvm: Permission denied\n"
+                b"private-fixture-token\n")
+            controller.record_qemu_exit(1)
+            self.assertEqual(controller.result["qemuKvmDiagnostics"], [
+                {"operation": "open", "errno": "EACCES"},
+                {"operation": "initialize", "errno": "EACCES"},
+            ])
+            self.assertEqual(controller.stage, "qemu-kvm-init")
+            self.assertNotIn("private-fixture", json.dumps(controller.result))
+
     def controller(self, folder):
         controller = host.Controller()
         controller.parent = Path(folder)
@@ -261,9 +424,13 @@ class BootDiagnosticsTests(unittest.TestCase):
             args = launch.call_args.args[0]
             self.assertIn("virtio-net-pci,netdev=net0,romfile=", args)
             self.assertEqual(args[args.index("-accel") + 1], "kvm")
+            self.assertEqual(args[:len(host.QEMU_MACHINE_ARGS)], list(host.QEMU_MACHINE_ARGS))
+            self.assertNotIn("-S", args)
+            self.assertNotIn("-nodefaults", args)
             self.assertIn(f"file={controller.disk},format=qcow2,if=virtio", args)
             self.assertIn("user,id=net0,hostfwd=tcp:127.0.0.1:23456-:22", args)
             self.assertEqual(launch.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertEqual(launch.call_args.kwargs["env"]["LC_ALL"], "C")
             self.assertEqual(ssh.call_args_list[0].args[0], ["true"])
             self.assertEqual(ssh.call_args_list[1].args[0], ["sudo", "-n", "cloud-init", "status", "--wait"])
 
