@@ -78,7 +78,8 @@ RUNTIME_PROBE = r'''
 import importlib.metadata, json, pathlib, subprocess, sys
 subprocess.run([sys.executable, "/opt/woow-artifact/verify.py", "runtime",
                 "--artifact", "/opt/woow-artifact", "--source-commit", sys.argv[1],
-                "--debian-security"], check=True, stdout=subprocess.DEVNULL)
+                "--debian-security", "--image-variant", "server"],
+               check=True, stdout=subprocess.DEVNULL)
 receipt = json.loads(pathlib.Path("/opt/woow-artifact/WOOW_BUILD_RECEIPT.json").read_text())
 print(json.dumps({"coreVersion": importlib.metadata.version("omnigent"), "receipt": receipt}))
 '''

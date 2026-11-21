@@ -40,7 +40,7 @@ Podman requires `component=server`, `variant=server`, the `-server-` tag and the
 The actual image's base-image label must exactly match the receipt, including its digest.
 
 Runtime verification uses `/opt/venv/bin/python` and the producer's
-`/opt/woow-artifact/verify.py runtime --artifact /opt/woow-artifact --source-commit ... --debian-security`.
+`/opt/woow-artifact/verify.py runtime --artifact /opt/woow-artifact --source-commit ... --debian-security --image-variant server`.
 That verifier checks wheel/manifest/UI hashes, installed file contents, imports and security
 fixes. The package then compares `/opt/woow-artifact/WOOW_BUILD_RECEIPT.json` with its checked-in
 receipt and verifies the actual image digest and OCI revision. No production config or

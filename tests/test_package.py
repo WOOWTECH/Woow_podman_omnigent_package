@@ -46,6 +46,26 @@ class ReceiptTests(unittest.TestCase):
                      "Architecture": "arm64", "RepoDigests": [self.receipt["image"]]}
         self.runtime = {"coreVersion": "0.21.0", "receipt": self.receipt}
 
+    def test_runtime_probe_selects_generic_security_variant(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        def generic_runtime(command, **kwargs):
+            self.assertIn("--debian-security", command)
+            self.assertIn("--image-variant", command,
+                          "producer defaults to Kubernetes dependency policy")
+            self.assertEqual(command[command.index("--image-variant") + 1], "server")
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("subprocess.run", side_effect=generic_runtime), \
+             patch("importlib.metadata.version", return_value="0.21.0"), \
+             patch("pathlib.Path.read_text", return_value=json.dumps(self.receipt)), \
+             patch("sys.argv", ["probe", self.receipt["sourceCommit"]]), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            exec(verify.RUNTIME_PROBE, {})
+        self.assertEqual(json.loads(output.getvalue())["coreVersion"], "0.21.0")
+
     def test_package_revision_is_independent_of_woow_image_tag(self):
         (self.repo / "VERSION").write_text("0.21.0-17\n")
         (self.repo / "quadlet/omnigent-runner.container").write_text("Image=localhost/woow-omnigent-runner:0.21.0-17\n")

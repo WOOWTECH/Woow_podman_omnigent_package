@@ -30,6 +30,7 @@ jobs:
       packages: write
 
     strategy:
+      fail-fast: false # retain independent runtime evidence for both architectures
       matrix:
         arch: [amd64, arm64]
 
