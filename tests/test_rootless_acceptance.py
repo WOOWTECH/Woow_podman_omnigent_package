@@ -173,6 +173,39 @@ class HarnessGuardTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(marker.exists())
 
+    def test_checkpoint_mutation_waits_for_resumed_http_and_refuses_unready_server(self):
+        source = (REPO / "tests/rootless-acceptance.sh").read_text()
+        wait = "wait_http() {" + source.split("wait_http() {", 1)[1].split("\nrun_stage restart-health", 1)[0]
+        sequence = "run_stage backup backup_checkpoint" + source.split("run_stage backup backup_checkpoint", 1)[1].split("\nrun_stage maintenance", 1)[0]
+        doubles = r'''run_stage() { shift; "$@"; }
+die() { return 1; }
+backup_checkpoint() {
+  mkdir -p "$work/backups/checkpoint"
+  printf '%s\n' "$work/backups/checkpoint" > "$work/backup-path"
+}
+curl() {
+  local count=0
+  [[ ! -f $work/polls ]] || count=$(<"$work/polls")
+  count=$((count + 1)); printf '%s' "$count" > "$work/polls"
+  if [[ $fixture_ready == yes && $count -ge 2 ]]; then
+    touch "$work/ready"; printf '{"status":"ok"}\n'; return 0
+  fi
+  return 7
+}
+jq() { cat >/dev/null; [[ -f $work/ready ]]; }
+sleep() { :; }
+python3() { [[ -f $work/ready ]] || return 7; touch "$work/mutated"; }
+'''
+        command = "set -euo pipefail\nwork=$1\nREPO=$2\nfixture_ready=$3\n" + doubles + wait + "\n" + sequence
+        for ready in ("yes", "no"):
+            with self.subTest(ready=ready), tempfile.TemporaryDirectory() as directory:
+                result = subprocess.run(["bash", "-c", command, "fixture", directory, str(REPO), ready],
+                                        text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode == 0, ready == "yes", result.stderr)
+                self.assertEqual((Path(directory) / "mutated").exists(), ready == "yes")
+                if ready == "yes":
+                    self.assertEqual((Path(directory) / "polls").read_text(), "2")
+
     def test_preflight_uses_podman49_template_fields_and_rejects_unsupported_hosts(self):
         source = (REPO / "tests/rootless-acceptance.sh").read_text()
         function = "preflight() {" + source.split("preflight() {", 1)[1].split("\nrun_stage preflight", 1)[0]

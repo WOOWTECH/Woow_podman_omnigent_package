@@ -150,6 +150,8 @@ backup_checkpoint() {
 run_stage backup backup_checkpoint
 backup_dir=$(<"$work/backup-path")
 [[ -d $backup_dir && $backup_dir == "$work/backups/"* ]] || die 'invalid checkpoint path'
+# Backup resumes systemd units before the HTTP server has finished starting.
+run_stage backup-resume-health wait_http
 run_stage mutate-after-checkpoint python3 "$REPO/tests/rootless-mcp.py" mutate "$work/profiles.json"
 run_stage maintenance systemctl --user stop omnigent-server-health.timer
 run_stage restore bash "$REPO/scripts/restore.sh" "$backup_dir" --with-secrets --yes
