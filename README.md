@@ -214,17 +214,36 @@ git pull
 scripts/upgrade.sh
 ```
 
-It snapshots the installed units, runs `scripts/backup.sh` (pg_dump plus volume exports),
-runs `scripts/install.sh` and `tests/smoke.sh`, and on any failure puts the previous units
-back and restarts them on the previous image tags. Upstream's database migrations are
-one-way: if the new server migrated the schema, the rollback also needs the dump, and the
-script prints the exact `scripts/restore.sh` command for it.
+For **0.21.0-3 native MCP**, use the [upgrade and full rollback procedure](docs/mcp-upgrade-rollback.md).
+The package includes the WOOW generic server `tag@digest` from source `459340b` and the
+unchanged producer receipt in `config/server-image.json`. The receipt records the source commit,
+wheel/UI hashes, supported architectures and build run. `tests/dryrun.sh` checks that contract;
+`tests/smoke-container.sh` also checks the running image and its embedded source receipt.
+Package revision `0.21.0-3` keeps the upstream core and host at `0.21.0`, Pi at `0.85.1`, and
+the existing runner base. The server's WOOW build tag need not equal the upstream version.
 
-Bumping the server means bumping `Image=` in `quadlet/omnigent-server.container`,
-`ARG OMNIGENT_VERSION` in `Containerfile.runner` and `VERSION` together; `tests/dryrun.sh`
-fails when they disagree. The server and Postgres images are written `tag@sha256:<digest>`
-(podman checks the digest and ignores the tag); get the digest of a new tag with
-`skopeo inspect --format '{{.Digest}}' docker://ghcr.io/omnigent-ai/omnigent-server:v<version>`.
+`upgrade.sh` snapshots installed units and takes `backup.sh --stop --include-secrets` before
+installing. A failed upgrade restores the old units and **leaves application writers stopped**.
+It prints the matching `restore.sh --with-secrets` command. Restore the database, artifacts,
+configuration and cookie secret together before starting the previous image; switching units
+alone cannot undo an Alembic migration.
+
+### Public MCP URL
+
+Set `OMNIGENT_MCP_PUBLIC_BASE_URL` in `~/.config/omnigent/omnigent.env` to the **complete
+external deployment base**, for example `https://agents.example.com/omnigent`. Include any
+proxy prefix once; the package passes it unchanged and the core never appends
+`OMNIGENT_WEB_BASE_PATH` to an explicit value. Do not append `/mcp` or a profile token.
+The core requires HTTPS (HTTP only for localhost, 127.0.0.1 or ::1 development), and rejects
+credentials, query strings, fragments and HA ingress paths. An empty or missing key uses the
+trusted accounts base URL; the core adds the web base path only if that URL has no path.
+
+After the approved upgrade, open **Settings → Admin → Omnigent MCP**, verify the linked
+account with its password and copy the generated link. The UI uses the profile API's canonical
+`connection_url`, including when the MCP origin differs from the Web UI origin. Profile URLs
+are credentials: keep them out of access logs, screenshots and public test reports. The reverse
+proxy must preserve MCP paths and support POST/GET/DELETE and streaming without requiring a
+browser login cookie. This uses the existing server port, network and persistent data volumes.
 
 ### From 0.19.1 to 0.21.0
 
@@ -258,16 +277,25 @@ has 3.5a. `OMNIGENT_FEATURES` stays `usage_page,harness_install`, both still val
 
 ```bash
 scripts/backup.sh                     # -> ~/backups/omnigent/<timestamp>/
-scripts/backup.sh --include-secrets   # also database, admin and operator passwords (secrets.env, 0600)
-scripts/backup.sh --stop              # stop the runner and the server around the volume exports
+scripts/backup.sh --include-secrets   # also database, admin and operator passwords (secrets.json, 0600)
+scripts/backup.sh --stop              # stop writers before BOTH the database dump and volume exports
 scripts/restore.sh ~/backups/omnigent/<timestamp> [--with-secrets]
 ```
 
 The backup is a `pg_dump -Fc` of the database, an export of `omnigent-server-data`, an export
-of `omnigent-pi-data` in private mode, and a copy of the env file. `restore.sh` stops the
-runner and the server, drops and recreates the database from the dump, replaces the volumes
-and runs the smoke test. `pi-agent-data` (shared mode) belongs to the pi-web package and is
-neither backed up nor restored here.
+of `omnigent-pi-data` in private mode, and a checkpoint of the env and installed unit files.
+`--stop` synchronously stops both writers even when activating or waiting to auto-restart,
+verifies their processes/jobs/containers are stopped, and resumes only previously running
+or starting units. Secrets use checksummed JSON so spaces, ` #`, quotes and newlines survive.
+
+Before any service stop or data replacement, `restore.sh` validates every required password,
+dump/archive checksums and formats, and requires the installed units and env to match the
+checkpoint exactly, including image pins and Pi mode. Follow the [full rollback procedure](docs/mcp-upgrade-rollback.md#full-rollback)
+to restore matching old units/config first. It then restores the database and volumes,
+restarts the old services and health timer, and runs smoke. Legacy raw `secrets.env` can be
+read losslessly, but backups without checkpoint unit metadata are refused. Unit drop-ins
+require a separately verified procedure; automatic checkpoint capture refuses them.
+`pi-agent-data` (shared mode) belongs to the pi-web package and is never backed up or restored here.
 
 ## Uninstall
 
@@ -354,11 +382,11 @@ all of that.
 
 ### Rollback
 
-`scripts/converge.sh --rollback` puts the saved unit files back, reloads and restarts the three
-services. Nothing in the converge removes an image, so the old floating tags are still on the
-host and the restored units start on exactly what they ran before. The database is untouched
-unless you rotated the secrets afterwards; if you did, restore `omnigent.pgdump` from the backup
-directory as well.
+`scripts/converge.sh --rollback` restores **unit files only** and restarts the services.
+It does not restore PostgreSQL, artifacts, configuration or the cookie secret. Do not use it
+to downgrade a database migrated by the MCP release. Follow the
+[full rollback procedure](docs/mcp-upgrade-rollback.md#full-rollback) with the matching backup
+and old image digests. Keep previous images locally; a mutable tag alone is not a rollback pin.
 
 ### Re-running is safe, and it does not move the rollback point
 

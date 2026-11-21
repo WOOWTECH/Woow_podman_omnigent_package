@@ -7,6 +7,9 @@
 # on a host that publishes somewhere other than the default 127.0.0.1:8000.
 set -uo pipefail
 
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+command -v podman >/dev/null || { echo "BLOCKED: podman is required for container smoke" >&2; exit 2; }
+
 ENV_FILE="${HOME}/.config/omnigent/omnigent.env"
 BIND="$(sed -n 's/^OMNIGENT_BIND=//p' "${ENV_FILE}" 2>/dev/null | tail -1)"
 PORT="$(sed -n 's/^OMNIGENT_PORT=//p' "${ENV_FILE}" 2>/dev/null | tail -1)"
@@ -49,6 +52,14 @@ case "${CODE}" in
     200|302|307) ok "/ -> ${CODE} (web UI reachable)" ;;
     *)           bad "/ -> ${CODE}" ;;
 esac
+
+echo
+echo "== Native MCP runtime source receipt =="
+if python3 "$REPO/scripts/verify-server-image.py" --container omnigent-server; then
+    ok "native MCP image and runtime source receipt"
+else
+    bad "native MCP source receipt or runtime mismatch"
+fi
 
 echo
 printf '  %d passed, %d failed\n\n' "${PASS_N}" "${FAIL_N}"

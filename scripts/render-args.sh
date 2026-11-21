@@ -15,4 +15,7 @@ render_args() {
     shared) RENDER_ARGS=(OMNIGENT_PI_VOLUME=pi-agent-data.volume) ;;
     *) ql_die "OMNIGENT_PI_STATE must be private or shared, not '$mode'" ;;
   esac
+  # Older installs predate this optional key. Pass an explicit empty value so the
+  # strict renderer can handle their env file without rewriting it.
+  RENDER_ARGS+=("OMNIGENT_MCP_PUBLIC_BASE_URL=$(ql_env_get OMNIGENT_MCP_PUBLIC_BASE_URL "")")
 }

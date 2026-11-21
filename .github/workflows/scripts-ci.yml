@@ -44,3 +44,8 @@ jobs:
 
       - name: Runner login helper and watchdog (fake auth server, stub CLI)
         run: tests/runner-login.sh
+
+      - name: MCP URL rendering and package lifecycle regressions
+        run: |
+          bash tests/mcp-render.sh
+          python3 -m unittest discover -s tests -p 'test_package.py' -v

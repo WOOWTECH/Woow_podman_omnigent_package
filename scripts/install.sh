@@ -63,6 +63,9 @@ done
 export QL_APP=$APP
 DRY=${QL_DRY_RUN:-0}
 
+# Refuse an incomplete candidate before changing host settings, images or units.
+python3 "$REPO/scripts/verify-server-image.py" || ql_die "server image receipt validation failed"
+
 # ---- 1. host preflight ---------------------------------------------------------------------
 ql_preflight "$PODMAN_MIN"
 for t in curl jq; do command -v "$t" >/dev/null 2>&1 || ql_die "$t not found (sudo apt-get install $t)"; done

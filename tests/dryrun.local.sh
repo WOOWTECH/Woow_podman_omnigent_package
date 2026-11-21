@@ -5,17 +5,17 @@
 
 local_fail() { echo "FAIL $*"; failures=$((failures + 1)); }
 
-# One version, four places: VERSION (<omnigent version>-<package revision>), the runner's
-# Image= tag, ARG OMNIGENT_VERSION in Containerfile.runner, and the server's Image= tag.
-ver=$(<"$REPO/VERSION")
-runner_tag=$(sed -n 's|^Image=localhost/woow-omnigent-runner:||p' "$REPO/quadlet/omnigent-runner.container")
-arg_ver=$(sed -n 's/^ARG OMNIGENT_VERSION=//p' "$REPO/Containerfile.runner")
-server_ref=$(sed -n 's|^Image=ghcr.io/omnigent-ai/omnigent-server:v||p' "$REPO/quadlet/omnigent-server.container")
-server_tag=${server_ref%%@*}
-if [[ $ver == "$runner_tag" && ${ver%%-*} == "$arg_ver" && ${ver%%-*} == "$server_tag" ]]; then
-  echo "ok   versions agree (VERSION=$ver, omnigent $arg_ver)"
+# Package revision and upstream runtime version are different contracts. WOOW server
+# tags include a source/build identity, so a tag string cannot attest the runtime.
+if python3 "$REPO/scripts/verify-server-image.py"; then
+  echo 'ok   package/host versions and pinned WOOW source receipt agree'
 else
-  local_fail "versions disagree: VERSION=$ver runner=$runner_tag ARG=$arg_ver server=v$server_tag"
+  local_fail 'server receipt/pin is absent or does not match the package (see verifier above)'
+fi
+if bash "$REPO/tests/mcp-render.sh"; then
+  echo 'ok   public MCP URL renders for private/shared and pre-MCP env files'
+else
+  local_fail 'public MCP URL rendering failed'
 fi
 
 # The server and Postgres images are pinned by digest as well as by tag (tag@sha256:<64 hex>),

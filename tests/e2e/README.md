@@ -48,6 +48,9 @@ marker in the user's prompt cannot pass it.
 ## Suites
 
 - `specs/smoke.spec.ts` — unauthenticated health/info + login flow
+- `specs/mcp.spec.ts` — admin profile creation, canonical external URL without a browser cookie,
+  and revocation; requires `OMNIGENT_MCP_PUBLIC_BASE_URL` and the verified MCP candidate.
+  It revokes its temporary profile on exit; traces, screenshots and videos are disabled.
 - `specs/settings.spec.ts` — settings shell (account/appearance/git/shortcuts/members/policies/sharing/archived)
 - `specs/chat.spec.ts` — operator-owned Pi round-trip (archives its session), harness picker,
   Ctrl+Shift+O (serial)
@@ -81,3 +84,10 @@ the automations tour. The chat spec's Pi round-trip needs a pi login and a real 
 so it runs against the live deployment; it passed there on 2026-11-13. The same day all
 24 tests passed on a throwaway 0.21.0 stack whose Pi used a stub OpenAI-compatible
 model, and the round-trip's session ended up archived whether the reply came or not.
+
+For the MCP spec, set `OMNIGENT_MCP_PUBLIC_BASE_URL` to the candidate's **complete external
+deployment base**, including any proxy prefix. The UI base may be a different origin. The
+external request uses a new client with no browser cookie and normal TLS verification. Run
+only against the authorized candidate environment; this spec creates and revokes a profile.
+It does not restart services. Cold boot, upgrade persistence and restore evidence must be
+recorded separately using [the rootless acceptance checklist](../../docs/mcp-upgrade-rollback.md).
