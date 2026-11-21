@@ -25,6 +25,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import time
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -33,11 +34,51 @@ NEW_HEAD = "za3b4c5d6e7f"
 BASE = "http://127.0.0.1:18000"
 CODES = {"arguments", "guard", "state", "schema", "stores", "accounts", "acl", "writers", "mutate"}
 current_step = "arguments"
+store_failure = None
+STORE_STEPS = {"unknown", "transport", "output", "imports", "request", "head",
+               "construct-accounts", "construct-agents", "construct-conversations",
+               "construct-permissions", "construct-tasks", "construct-artifacts",
+               "seed-accounts", "seed-artifacts", "seed-agent", "seed-sessions",
+               "seed-items", "seed-task", "snapshot", "snapshot-accounts",
+               "snapshot-sessions", "snapshot-items", "snapshot-task",
+               "snapshot-artifacts", "serialize"}
+ERROR_CLASSES = {"OtherError", "ValueError", "RuntimeError", "OperationalError",
+                 "IntegrityError", "ProgrammingError", "DataError", "InterfaceError",
+                 "TimeoutError", "TimeoutExpired", "ModuleNotFoundError", "ImportError",
+                 "KeyError", "TypeError", "AttributeError", "PermissionError",
+                 "FileNotFoundError", "OSError", "JSONDecodeError", "SubprocessError",
+                 "AssertionError", "InvalidRequestError", "StatementError", "DBAPIError",
+                 "DisconnectionError", "PendingRollbackError", "ResourceClosedError"}
+SQLSTATES = {"none", "other", "08000", "08001", "08003", "08004", "08006", "08007",
+             "08P01", "22001", "22003", "22007", "22P02", "23502", "23503", "23505",
+             "23514", "25006", "25P02", "28000", "28P01", "40001", "40P01", "42501",
+             "42601", "42703", "42P01", "53200", "53300", "53400", "55000", "55P03",
+             "57014", "57P01", "57P02", "57P03", "58030", "XX000", "XX001", "XX002"}
+
+# Only this fixed vocabulary may cross from private worker pipes to the receipt.
+WORKER_DIAGNOSTICS = ("ERROR_CLASSES = " + repr(sorted(ERROR_CLASSES)) + "\n" +
+                      "SQLSTATES = " + repr(sorted(SQLSTATES)) + "\n" + r'''
+import json, sys
+
+def worker_stage(value):
+    print("LEGACY_STAGE " + value, file=sys.stderr, flush=True)
+
+def worker_error(kind, error, traceback):
+    name = kind.__name__
+    original = getattr(error, "orig", error)
+    code = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    diagnostic = {"exceptionClass": name if name in ERROR_CLASSES else "OtherError",
+                  "sqlstate": "none" if code is None else code if code in SQLSTATES else "other"}
+    print("LEGACY_ERROR " + json.dumps(diagnostic), file=sys.stderr, flush=True)
+
+sys.excepthook = worker_error
+''')
 
 # Executed by python in the *installed* server image, not the checkout's Python.
 # Input and output are private pipes. Direct stores create an already-paused task
 # and unbound sessions, so seeding cannot invoke a provider or runner.
-WORKER = r'''
+WORKER = WORKER_DIAGNOSTICS + r'''
+worker_stage("imports")
 import dataclasses, hashlib, io, json, os, sys, tarfile
 from omnigent.entities import NewConversationItem
 from omnigent.entities.conversation import MessageData, FunctionCallData, FunctionCallOutputData
@@ -64,6 +105,7 @@ def plain(value):
         return [plain(v) for v in value]
     return value
 
+worker_stage("request")
 request = json.load(sys.stdin)
 s = request["state"]
 uri = os.environ["DATABASE_URL"]
@@ -71,6 +113,7 @@ uri = os.environ["DATABASE_URL"]
 # constructing stores if this installed package disagrees with the live DB.
 from sqlalchemy import create_engine, text
 from omnigent.db import utils as db_utils
+worker_stage("head")
 probe = create_engine(db_utils.normalize_database_url(uri))
 with probe.connect() as connection:
     require(connection.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
@@ -79,21 +122,29 @@ probe.dispose()
 def forbid_migration(*args, **kwargs):
     raise ValueError("legacy-fixture-must-not-migrate")
 db_utils._run_migrations = forbid_migration
+worker_stage("construct-accounts")
 accounts = SqlAlchemyAccountStore(uri)
+worker_stage("construct-agents")
 agents = SqlAlchemyAgentStore(uri)
+worker_stage("construct-conversations")
 conversations = SqlAlchemyConversationStore(uri)
+worker_stage("construct-permissions")
 permissions = SqlAlchemyPermissionStore(uri)
+worker_stage("construct-tasks")
 tasks = SqlAlchemyScheduledTaskStore(uri)
+worker_stage("construct-artifacts")
 artifacts = LocalArtifactStore(os.environ["ARTIFACT_DIR"])
 marker_key = "legacy-ci/" + s["nonce"] + "/marker.txt"
 bundle_key = "legacy-ci/" + s["nonce"] + "/agent.tar.gz"
 
 if request["operation"] == "seed":
+    worker_stage("seed-accounts")
     for role in ("owner", "viewer"):
         user = s[role]
         require(accounts.get_user(user["id"]) is None)
         accounts.create_user_with_password(user["id"], hash_password(user["password"]),
                                           is_admin=role == "owner")
+    worker_stage("seed-artifacts")
     data = b"name: legacy-ci\nprompt: Never execute this fixture.\nexecutor:\n  model: gpt-4o-mini\n  harness: openai-agents\n"
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as archive:
@@ -102,14 +153,17 @@ if request["operation"] == "seed":
         archive.addfile(entry, io.BytesIO(data))
     artifacts.put(bundle_key, buf.getvalue())
     artifacts.put(marker_key, b"legacy fixture artifact\x00preserve bytes\n")
+    worker_stage("seed-agent")
     agents.create(s["agent"], "legacy-" + s["nonce"], bundle_key,
                   description="Synthetic upgrade fixture; never execute")
     for visibility, sid in s["sessions"].items():
+        worker_stage("seed-sessions")
         conversations.create_conversation(conversation_id=sid, title="legacy-" + visibility,
                                           agent_id=s["agent"])
         permissions.grant(s["owner"]["id"], sid, 4)
         if visibility == "shared":
             permissions.grant(s["viewer"]["id"], sid, 1)
+        worker_stage("seed-items")
         items = []
         # Six ordered items cross a page boundary at limit=2. Tool calls are data.
         payloads = [
@@ -124,14 +178,17 @@ if request["operation"] == "seed":
             items.append(NewConversationItem(type=kind, response_id="legacy-response", data=data,
                 created_by=s["owner"]["id"] if kind == "message" and data.role == "user" else None))
         conversations.append(sid, items)
+    worker_stage("seed-task")
     tasks.create(s["task"], "legacy-paused", "Never run this fixture.",
                  "FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1", s["owner"]["id"], s["agent"], "UTC",
                  state="paused", execution_target="connected_host")
 elif request["operation"] != "verify":
     raise ValueError("legacy-worker-operation")
 
+worker_stage("snapshot")
 snapshot = {"accounts": {}, "sessions": {}, "agent": plain(agents.get(s["agent"])),
             "task": plain(tasks.get(s["task"])), "artifacts": {}}
+worker_stage("snapshot-accounts")
 for role in ("owner", "viewer"):
     user = accounts.get_user(s[role]["id"])
     require(user is not None and user.is_admin == (role == "owner"))
@@ -140,6 +197,7 @@ for role in ("owner", "viewer"):
     snapshot["accounts"][role]["passwordHashDigest"] = hashlib.sha256(
         accounts.get_password_hash(user.id).encode()).hexdigest()
 for visibility, sid in s["sessions"].items():
+    worker_stage("snapshot-sessions")
     conv = conversations.get_conversation(sid)
     require(conv is not None and conv.runner_id is None and conv.host_id is None)
     grants, cursor = permissions.list_for_session(sid)
@@ -149,6 +207,7 @@ for visibility, sid in s["sessions"].items():
     if visibility == "shared":
         want.append((s["viewer"]["id"], 1))
     require(got == sorted(want))
+    worker_stage("snapshot-items")
     items, after = [], None
     for _ in range(4):
         page = conversations.list_items(sid, limit=2, after=after, order="asc")
@@ -163,12 +222,15 @@ for visibility, sid in s["sessions"].items():
             ("id", "title", "agent_id", "created_at", "labels", "runner_id", "host_id")},
         "grants": plain(grants), "items": items,
     }
+worker_stage("snapshot-task")
 require(snapshot["agent"] is not None)
 require(snapshot["task"] is not None and snapshot["task"]["state"] == "paused")
 require(snapshot["task"]["last_run_at"] is None and snapshot["task"]["last_run_conversation_id"] is None)
 require(snapshot["task"]["next_run_at"] is None)
+worker_stage("snapshot-artifacts")
 for key in (marker_key, bundle_key):
     snapshot["artifacts"][key] = hashlib.sha256(artifacts.get(key)).hexdigest()
+worker_stage("serialize")
 print(json.dumps(snapshot, sort_keys=True))
 '''
 
@@ -250,8 +312,8 @@ def state_path(value):
 
 
 def report_failure(code):
-    # The harness deletes private logs during cleanup. Preserve only an allowlisted
-    # substep in its private failure file, never an exception or subprocess output.
+    # Cleanup deletes private logs. Persist only fixed codes and bounded numbers;
+    # exception messages, traceback, SQL, URLs and worker output remain private.
     if code not in {"legacy-" + name for name in CODES}:
         return
     value = os.environ.get("OMNIGENT_ROOTLESS_FAILURE_FILE")
@@ -262,6 +324,8 @@ def report_failure(code):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w", encoding="ascii") as stream:
             stream.write(code + "\n")
+        if code == "legacy-stores" and valid_store_failure(store_failure):
+            save_new(private_path(str(path) + ".json"), store_failure)
     except (OSError, KeyError, RuntimeError, FixtureError):
         pass  # Reporting failure must not hide the original fixture failure.
 
@@ -339,10 +403,78 @@ def inspect_schema(head, mcp):
     check_schema(psql(SCHEMA_SQL), head, mcp)
 
 
+def valid_store_failure(value):
+    return (isinstance(value, dict) and
+            set(value) == {"substep", "exceptionClass", "sqlstate", "returnCode", "elapsedMs"} and
+            isinstance(value["substep"], str) and value["substep"] in STORE_STEPS and
+            isinstance(value["exceptionClass"], str) and value["exceptionClass"] in ERROR_CLASSES and
+            isinstance(value["sqlstate"], str) and value["sqlstate"] in SQLSTATES and
+            (value["returnCode"] is None or
+             type(value["returnCode"]) is int and -255 <= value["returnCode"] <= 255) and
+            type(value["elapsedMs"]) is int and 0 <= value["elapsedMs"] <= 300_000)
+
+
+def read_store_failure(value):
+    try:
+        path = private_path(value)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd) as stream:
+            info = os.fstat(stream.fileno())
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 4096)
+            require(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o600)
+            result = json.loads(stream.read(4097))
+        return result if valid_store_failure(result) else None
+    except (OSError, KeyError, RuntimeError, ValueError, FixtureError):
+        return None
+
+
+def worker_failure(stderr, returncode, started, fallback="OtherError", substep="transport"):
+    diagnostic = {"substep": substep, "exceptionClass": fallback, "sqlstate": "none",
+                  "returnCode": returncode if type(returncode) is int and -255 <= returncode <= 255 else None,
+                  "elapsedMs": max(0, min(300_000, int((time.monotonic() - started) * 1000)))}
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    for line in (stderr or "")[-8192:].splitlines():
+        if line.startswith("LEGACY_STAGE ") and line[13:] in STORE_STEPS:
+            diagnostic["substep"] = line[13:]
+        elif line.startswith("LEGACY_ERROR "):
+            try:
+                value = json.loads(line[13:])
+            except ValueError:
+                continue
+            if isinstance(value, dict) and set(value) == {"exceptionClass", "sqlstate"}:
+                candidate = {**diagnostic, **value}
+                if valid_store_failure(candidate):
+                    diagnostic = candidate
+    # A host timeout or output parse failure has priority over child diagnostics.
+    if fallback != "OtherError":
+        diagnostic["exceptionClass"] = fallback
+    if substep == "output":
+        diagnostic["substep"] = "output"
+    return diagnostic
+
+
 def worker(operation, state):
+    global store_failure
     step("stores")
-    return json.loads(run(["podman", "exec", "-i", "omnigent-server", "python3", "-I", "-c", WORKER],
-                          data=json.dumps({"operation": operation, "state": state})).stdout)
+    store_failure = None
+    started = time.monotonic()
+    try:
+        result = run(["podman", "exec", "-i", "omnigent-server", "python3", "-I", "-c", WORKER],
+                     data=json.dumps({"operation": operation, "state": state}), check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        name = type(error).__name__
+        store_failure = worker_failure(getattr(error, "stderr", None), None, started,
+                                       name if name in ERROR_CLASSES else "OtherError")
+        raise
+    if result.returncode != 0:
+        store_failure = worker_failure(result.stderr, result.returncode, started)
+        raise FixtureError()
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        store_failure = worker_failure(result.stderr, result.returncode, started, "JSONDecodeError", "output")
+        raise
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -473,6 +605,8 @@ class QuietParser(argparse.ArgumentParser):
 
 
 def main(argv=None):
+    global store_failure
+    store_failure = None
     step("arguments")
     parser = QuietParser(description=__doc__)
     parser.add_argument("operation", choices=("seed", "verify", "inspect", "mutate"))

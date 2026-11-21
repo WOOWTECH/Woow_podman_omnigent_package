@@ -282,6 +282,175 @@ class StateAndSafetyTests(unittest.TestCase):
                 legacy.compare_snapshot(baseline, actual)
 
 
+
+class WorkerDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.private = self.root / "private"
+        self.private.mkdir(mode=0o700)
+        self.private.chmod(0o700)
+        self.failure = self.private / "failure-code"
+        self.sidecar = self.private / "failure-code.json"
+        self.env = patch.dict(os.environ, {"RUNNER_TEMP": str(self.root),
+                                          "OMNIGENT_ROOTLESS_FAILURE_FILE": str(self.failure)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.addCleanup(setattr, legacy, "store_failure", None)
+        self.diagnostic = {"substep": "seed-items", "exceptionClass": "OperationalError",
+                           "sqlstate": "08006", "returnCode": 1, "elapsedMs": 23000}
+
+    def test_actual_child_exception_hook_exports_codes_without_exception_details(self):
+        code = legacy.WORKER_DIAGNOSTICS + r'''
+worker_stage("seed-items")
+class OperationalError(Exception):
+    sqlstate = "08006"
+error = OperationalError("synthetic-private-message")
+error.params = {"private-parameter": "never-print"}
+raise error
+'''
+        result = REAL_RUN(["python3", "-I", "-c", code], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn("synthetic-private", result.stderr)
+        self.assertNotIn("private-parameter", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        value = legacy.worker_failure(result.stderr, result.returncode, legacy.time.monotonic())
+        self.assertEqual(value["substep"], "seed-items")
+        self.assertEqual(value["exceptionClass"], "OperationalError")
+        self.assertEqual(value["sqlstate"], "08006")
+        self.assertTrue(legacy.valid_store_failure(value))
+
+    def test_unknown_child_class_and_sqlstate_are_replaced_with_fixed_codes(self):
+        code = legacy.WORKER_DIAGNOSTICS + r'''
+worker_stage("head")
+error = type("synthetic-private-class", (Exception,), {"pgcode": "synthetic-private-code"})("private")
+raise error
+'''
+        result = REAL_RUN(["python3", "-I", "-c", code], capture_output=True, text=True, timeout=5)
+        self.assertNotIn("synthetic-private", result.stderr)
+        value = legacy.worker_failure(result.stderr, 1, legacy.time.monotonic())
+        self.assertEqual((value["exceptionClass"], value["sqlstate"]), ("OtherError", "other"))
+
+    def test_nested_driver_sqlstate_and_no_driver_code(self):
+        for driver_field in ("sqlstate", "pgcode", None):
+            definition = "original = type('DriverError', (Exception,), " + repr(
+                {} if driver_field is None else {driver_field: "23505"}) + ")()\n"
+            code = legacy.WORKER_DIAGNOSTICS + definition + (
+                "error = ValueError('private')\nerror.orig = original\nraise error\n")
+            result = REAL_RUN(["python3", "-I", "-c", code], capture_output=True, text=True, timeout=5)
+            value = legacy.worker_failure(result.stderr, 1, legacy.time.monotonic())
+            self.assertEqual(value["sqlstate"], "none" if driver_field is None else "23505")
+
+    def test_metadata_rejects_unlisted_strings_extra_fields_and_unbounded_numbers(self):
+        changes = [{"substep": "private-detail"}, {"exceptionClass": "private-detail"},
+                   {"sqlstate": "private-detail"}, {"sqlstate": []}, {"returnCode": True},
+                   {"returnCode": 256}, {"elapsedMs": -1}, {"elapsedMs": 300001},
+                   {"elapsedMs": True}, {"message": "private-detail"}]
+        for change in changes:
+            with self.subTest(change=change):
+                self.assertFalse(legacy.valid_store_failure({**self.diagnostic, **change}))
+        noisy = ('private-detail\nLEGACY_STAGE private-detail\nLEGACY_ERROR ' +
+                 json.dumps({"exceptionClass": "private-detail", "sqlstate": "none"}))
+        value = legacy.worker_failure(noisy, 999, legacy.time.monotonic())
+        self.assertTrue(legacy.valid_store_failure(value))
+        self.assertNotIn("private-detail", json.dumps(value))
+        self.assertIsNone(value["returnCode"])
+
+    def test_worker_failure_and_timeout_keep_last_substep_without_retry(self):
+        stderr = 'LEGACY_STAGE seed-task\nLEGACY_ERROR {"exceptionClass":"IntegrityError","sqlstate":"23505"}\n'
+        result = subprocess.CompletedProcess([], 1, "private-output", stderr)
+        with patch.object(legacy, "run", return_value=result) as run:
+            with self.assertRaises(legacy.FixtureError):
+                legacy.worker("seed", {})
+            self.assertEqual(run.call_count, 1)
+        self.assertEqual(legacy.store_failure["substep"], "seed-task")
+        self.assertEqual(legacy.store_failure["exceptionClass"], "IntegrityError")
+        self.assertEqual(legacy.store_failure["returnCode"], 1)
+        timeout = subprocess.TimeoutExpired(["private-command"], 120, stderr=b"LEGACY_STAGE construct-tasks\n")
+        with patch.object(legacy, "run", side_effect=timeout) as run:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                legacy.worker("seed", {})
+            self.assertEqual(run.call_count, 1)
+        self.assertEqual(legacy.store_failure["substep"], "construct-tasks")
+        self.assertEqual(legacy.store_failure["exceptionClass"], "TimeoutExpired")
+        self.assertIsNone(legacy.store_failure["returnCode"])
+
+    def test_invalid_output_success_and_transport_failure_are_distinct(self):
+        with patch.object(legacy, "run", return_value=subprocess.CompletedProcess([], 0, "private", "LEGACY_STAGE serialize\n")), \
+             self.assertRaises(ValueError):
+            legacy.worker("seed", {})
+        self.assertEqual(legacy.store_failure["substep"], "output")
+        self.assertEqual(legacy.store_failure["exceptionClass"], "JSONDecodeError")
+        self.assertEqual(legacy.store_failure["returnCode"], 0)
+        with patch.object(legacy, "run", side_effect=FileNotFoundError("private")), self.assertRaises(FileNotFoundError):
+            legacy.worker("seed", {})
+        self.assertEqual(legacy.store_failure["substep"], "transport")
+        self.assertEqual(legacy.store_failure["exceptionClass"], "FileNotFoundError")
+        with patch.object(legacy, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")):
+            self.assertEqual(legacy.worker("seed", {}), {})
+        self.assertIsNone(legacy.store_failure)
+
+    def test_private_sidecar_no_overwrite_and_reader_rejects_unsafe_files(self):
+        legacy.store_failure = self.diagnostic
+        legacy.report_failure("legacy-stores")
+        self.assertEqual(self.sidecar.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(legacy.read_store_failure(str(self.sidecar)), self.diagnostic)
+        self.failure.unlink()
+        legacy.store_failure = {**self.diagnostic, "returnCode": 2}
+        legacy.report_failure("legacy-stores")
+        self.assertEqual(legacy.read_store_failure(str(self.sidecar)), self.diagnostic)
+        link = self.private / "link.json"
+        link.symlink_to(self.sidecar)
+        self.assertIsNone(legacy.read_store_failure(str(link)))
+        link.unlink()
+        os.link(self.sidecar, link)
+        self.assertIsNone(legacy.read_store_failure(str(self.sidecar)))
+        link.unlink()
+        self.sidecar.chmod(0o644)
+        self.assertIsNone(legacy.read_store_failure(str(self.sidecar)))
+        self.sidecar.chmod(0o600)
+        for content in ("private", "x" * 4097, json.dumps({**self.diagnostic, "message": "private"})):
+            self.sidecar.write_text(content)
+            self.assertIsNone(legacy.read_store_failure(str(self.sidecar)))
+        self.sidecar.unlink()
+        os.mkfifo(self.sidecar, 0o600)
+        self.assertIsNone(legacy.read_store_failure(str(self.sidecar)))
+
+    def test_real_harness_preserves_only_validated_metadata_before_cleanup(self):
+        legacy.store_failure = self.diagnostic
+        legacy.report_failure("legacy-stores")
+        repo = Path(__file__).resolve().parent.parent
+        harness = (repo / "tests/rootless-acceptance.sh").read_text()
+        def shell_function(name):
+            return name + "() {" + harness.split(name + "() {", 1)[1].split("\n}", 1)[0] + "\n}\n"
+        command = r'''
+set -euo pipefail
+work=$1; REPO=$2; report=$3
+HOME=$work/unused-home
+phase=legacy-seed; rootless_verified=true; arch=amd64; pi_mode=private
+legacy_head=431759826c6e6ea25579b05051de102699e54229
+OMNIGENT_ROOTLESS_HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+completed=(preflight)
+systemctl() { return 0; }
+podman() { return 0; }
+rm() { for arg in "$@"; do if [[ $arg == "$work" ]]; then command rm -rf -- "$work"; fi; done; return 0; }
+'''
+        command += "".join(shell_function(name) for name in
+                           ("read_failure_code", "read_legacy_store_failure", "finish"))
+        command += "trap finish EXIT\nfalse\n"
+        report = self.root / "result.json"
+        result = REAL_RUN(["bash", "-c", command, "fixture", str(self.private), str(repo), str(report)],
+                          capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        receipt = json.loads(report.read_text())
+        self.assertEqual(receipt["failureCode"], "legacy-stores")
+        self.assertEqual(receipt["legacyStoreFailure"], self.diagnostic)
+        self.assertTrue(receipt["cleanupComplete"])
+        self.assertFalse(self.private.exists())
+
+
 class WritersAndHTTPTests(unittest.TestCase):
     def writer_run(self, args, **kwargs):
         if args[0] == "systemctl":

@@ -75,11 +75,21 @@ read_failure_code() {
   esac
   printf '%s' "$code"
 }
+read_legacy_store_failure() {
+  python3 - "$REPO/tests/rootless-legacy-fixtures.py" "$OMNIGENT_ROOTLESS_FAILURE_FILE.json" <<'LEGACY_DIAGNOSTIC'
+import json, runpy, sys
+helper = runpy.run_path(sys.argv[1])
+print(json.dumps(helper['read_store_failure'](sys.argv[2])))
+LEGACY_DIAGNOSTIC
+}
 finish() {
-  local rc=$? cleanup_rc=0 cleanup_code='' volume_rc=0 failure_code
+  local rc=$? cleanup_rc=0 cleanup_code='' volume_rc=0 failure_code store_diagnostic=null
   failure_code=$(read_failure_code)
   trap - EXIT
   set +e
+  if [[ $failure_code == legacy-stores && -f $OMNIGENT_ROOTLESS_FAILURE_FILE.json ]]; then
+    store_diagnostic=$(read_legacy_store_failure 2>/dev/null) || store_diagnostic=null
+  fi
   cleanup_failure() { cleanup_rc=1; [[ -n $cleanup_code ]] || cleanup_code=$1; }
   # Only the fresh, named resources this script owns. Never export logs/dumps/secrets.
   systemctl --user stop omnigent-server-health.timer omnigent-runner.service omnigent-server.service omnigent-postgres.service >/dev/null 2>&1
@@ -113,8 +123,8 @@ finish() {
     if ((rc == 0)); then phase=cleanup; failure_code=$cleanup_code; fi
     rc=1
   fi
-  python3 - "$report" "$REPO" "$rc" "$phase" "$rootless_verified" "$cleanup_rc" "$failure_code" "$arch" "$pi_mode" "$legacy_head" "$OMNIGENT_ROOTLESS_HEAD" "${completed[@]}" <<'PY'
-import json, pathlib, subprocess, sys
+  OMNIGENT_LEGACY_STORE_FAILURE=$store_diagnostic python3 - "$report" "$REPO" "$rc" "$phase" "$rootless_verified" "$cleanup_rc" "$failure_code" "$arch" "$pi_mode" "$legacy_head" "$OMNIGENT_ROOTLESS_HEAD" "${completed[@]}" <<'PY'
+import json, os, pathlib, subprocess, sys
 path, repo, rc, phase, rootless, cleanup, failure_code, arch, mode, legacy, expected, *stages = sys.argv[1:]
 receipt = json.loads((pathlib.Path(repo) / 'config/server-image.json').read_text())
 result = {'status': 'passed' if rc == '0' and phase == 'complete' else 'failed',
@@ -125,6 +135,9 @@ result = {'status': 'passed' if rc == '0' and phase == 'complete' else 'failed',
           'packageCommit': subprocess.check_output(['git','rev-parse','HEAD'], cwd=repo, text=True).strip(),
           'sourceCommit': receipt['sourceCommit'], 'imageDigest': receipt['imageDigest'],
           'exclusions': ['cold boot', 'full Pi web application', 'paid model execution']}
+diagnostic = json.loads(os.environ.get('OMNIGENT_LEGACY_STORE_FAILURE', 'null'))
+if rc != '0' and failure_code == 'legacy-stores' and isinstance(diagnostic, dict):
+    result['legacyStoreFailure'] = diagnostic
 pathlib.Path(path).write_text(json.dumps(result, indent=2)+'\n')
 PY
   if ((rc == 0)); then printf 'PASS disposable rootless acceptance\n'; else printf 'FAIL disposable rootless stage %s step %s (exit %s)\n' "$phase" "$failure_code" "$rc"; fi
@@ -135,7 +148,7 @@ trap finish EXIT
 run_stage() {
   phase=$1
   shift
-  rm -f -- "$OMNIGENT_ROOTLESS_FAILURE_FILE"
+  rm -f -- "$OMNIGENT_ROOTLESS_FAILURE_FILE" "$OMNIGENT_ROOTLESS_FAILURE_FILE.json"
   printf 'RUN %s\n' "$phase"
   local rc=0
   # Keep errexit inside shell functions too; an OR-list would disable it there.
