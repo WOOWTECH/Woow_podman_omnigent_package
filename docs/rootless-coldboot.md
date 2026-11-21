@@ -69,6 +69,17 @@ physical-host coldboot remains a separate deployment acceptance criterion.
   [fingerprint module](https://github.com/canonical/cloud-init/blob/24.1/cloudinit/config/cc_ssh_authkey_fingerprints.py)
   through its [SSH path helper](https://github.com/canonical/cloud-init/blob/24.1/cloudinit/ssh_util.py),
   even when the user has no authorized keys.
+- The guest keeps APT recommendations disabled and explicitly installs `netavark`
+  and `aardvark-dns`. Noble lists the DNS helper as a
+  [recommendation](https://packages.ubuntu.com/noble/netavark), and it is absent
+  from the [dated base-image manifest](https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.manifest).
+  The stack uses container names for server/database and runner/server traffic.
+  Netavark 1.4 [skips DNS startup when the helper is absent](https://github.com/containers/netavark/blob/v1.4.0/src/commands/setup.rs#L113-L148).
+  Both Ubuntu helper binaries must execute `--version` before source extraction,
+  linger setup or the installer; a missing/failing helper stops at
+  `guest-network-tools`. This catches the dependency omission early. A passing
+  helper check alone does not prove name resolution or explain a historical
+  health timeout; the actual installer and two-boot acceptance must still pass.
 - Fresh SSH client and host keys are generated per run. Strict checking against
   the injected host key is mandatory on both boots. No `ssh-keyscan`/trust on
   first use. QEMU exposes only an SSH forward bound to host `127.0.0.1`; application
@@ -220,3 +231,17 @@ not establish a root cause. Unknown fields are discarded at the host boundary.
 Raw stdout/stderr, commands, paths, URLs and exceptions remain private and are
 removed with the owned guest disk. Failure is never retried or converted to a
 coldboot pass. The installer and the two-boot acceptance sequence are unchanged.
+
+
+Only a first-boot `prepare` failure at `install-http-health` also gathers
+`installRuntime`, before cleanup: fixed service/container states, exit codes and
+OOM flags for the three owned components; PostgreSQL readiness; network backend
+and DNS-enabled flag; helper-executable presence; and database-name resolution
+inside the owned server container. Ten read-only commands share a 20-second
+budget, with at most two seconds per command. No owner login, service start,
+restart, journal read, credential inspection, raw log upload or repair is performed.
+The resolver prints no addresses. Missing containers, timeout or malformed output
+remain `unavailable`/null. The host reconstructs the fixed schema and discards
+unknown fields. Snapshot failure preserves the original acceptance failure and
+full cleanup. This snapshot never runs during second-boot verification, so it
+cannot activate or probe the owner before the boot/manager/health gates.

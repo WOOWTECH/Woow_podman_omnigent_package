@@ -1048,6 +1048,67 @@ class OwnerSshStateTests(unittest.TestCase):
                 self.assertEqual(guest.inspect_owner_ssh(), state)
 
 
+class GuestNetworkPackagesTests(unittest.TestCase):
+    def package_fixture(self, failure=None):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        folder = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        stack.enter_context(mock.patch.object(guest, "ROOT", folder / "state"))
+        stack.enter_context(mock.patch.object(guest, "SOURCE", folder / "source"))
+        stack.enter_context(mock.patch.object(guest, "HOME", folder / "home"))
+        stack.enter_context(mock.patch.object(guest.Path, "exists", return_value=False))
+        stack.enter_context(mock.patch.object(guest.Path, "is_symlink", return_value=False))
+        def command(args, **_kwargs):
+            if args == ["podman", "--version"]:
+                return "podman version 4.9.3"
+            if args == ["/usr/lib/podman/netavark", "--version"]:
+                return "netavark 1.4.0"
+            if args == ["/usr/lib/podman/aardvark-dns", "--version"]:
+                if failure:
+                    raise failure
+                return "aardvark-dns 1.4.0"
+            return ""
+        run = stack.enter_context(mock.patch.object(guest, "run", side_effect=command))
+        source = stack.enter_context(mock.patch.object(guest, "extract_source", side_effect=StopIteration))
+        owner = stack.enter_context(mock.patch.object(guest, "owner"))
+        return stack, run, source, owner
+
+    def test_recommendations_disabled_installs_required_container_dns_explicitly(self):
+        stack, run, source, owner = self.package_fixture()
+        with stack, self.assertRaises(StopIteration):
+            guest.prepare(HEAD, SOURCE_HASH)
+        apt = next(call.args[0] for call in run.call_args_list if "--no-install-recommends" in call.args[0])
+        self.assertIn("aardvark-dns", apt)
+        self.assertIn("netavark", apt)
+        source.assert_called_once()
+        owner.assert_not_called()
+
+
+    def test_network_helpers_execute_before_source_or_owner_commands(self):
+        stack, run, source, owner = self.package_fixture()
+        with stack, self.assertRaises(StopIteration):
+            guest.prepare(HEAD, SOURCE_HASH)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn(["/usr/lib/podman/netavark", "--version"], commands)
+        self.assertIn(["/usr/lib/podman/aardvark-dns", "--version"], commands)
+        self.assertLess(commands.index(["/usr/lib/podman/aardvark-dns", "--version"]),
+                        commands.index(["apt-get", "clean"]))
+        source.assert_called_once()
+        owner.assert_not_called()
+
+    def test_missing_or_failed_dns_helper_stops_before_install_with_fixed_code(self):
+        for error in (FileNotFoundError("synthetic-private-path"), guest.Failure()):
+            stack, run, source, owner = self.package_fixture(error)
+            with stack, self.assertRaises(type(error)):
+                guest.prepare(HEAD, SOURCE_HASH)
+            self.assertEqual(guest.phase, "guest-network-tools")
+            self.assertIn(guest.phase, host.GUEST_CODES)
+            self.assertEqual(sum(call.args[0] == ["/usr/lib/podman/aardvark-dns", "--version"]
+                                 for call in run.call_args_list), 1)
+            source.assert_not_called()
+            owner.assert_not_called()
+
+
 class InstallerDiagnosticsTests(unittest.TestCase):
     def test_failed_installer_reports_fixed_build_code_and_keeps_output_private(self):
         # Exercise the real subprocess boundary without Podman, accounts or a VM.
@@ -1180,6 +1241,125 @@ class InstallerDiagnosticsTests(unittest.TestCase):
         with mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=0, stdout=json.dumps(reply))):
             controller.guest("prepare")
         self.assertNotIn("installerFailure", controller.result)
+
+
+class InstallRuntimeSnapshotTests(unittest.TestCase):
+    def test_http_install_failure_collects_snapshot_and_preserves_failure(self):
+        def failed_prepare(*_args):
+            guest.stage("install-http-health")
+            raise guest.Failure()
+        with mock.patch.object(guest, "guard"), mock.patch.object(guest, "prepare", side_effect=failed_prepare), mock.patch.object(guest, "install_runtime_snapshot", create=True, return_value={"fixture": True}) as snapshot, mock.patch.object(guest.sys, "argv", ["guest", "prepare", NONCE, HEAD, SOURCE_HASH]), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(guest.main(), 1)
+        snapshot.assert_called_once_with()
+        value = json.loads(output.getvalue())
+        self.assertFalse(value["ok"])
+        self.assertEqual(value["failureCode"], "install-http-health")
+        self.assertEqual(value["installRuntime"], {"fixture": True})
+
+
+    def test_snapshot_observes_database_and_dns_with_only_owned_read_only_commands(self):
+        private = "synthetic-private-output"
+        def command(args, **_kwargs):
+            self.assertEqual(args[0], "setpriv")
+            args = args[1:]
+            output, rc = "", 0
+            if args[0] == "systemctl":
+                output = "ActiveState=active\nResult=success\nExecMainStatus=0\nPrivate=" + private
+            elif args[:2] == ["podman", "inspect"]:
+                output = "running|0|false"
+            elif args[:2] == ["podman", "info"]:
+                output = "netavark"
+            elif args[:3] == ["podman", "network", "inspect"]:
+                output = "false"
+            elif "pg_isready" in args:
+                output = private
+            elif "python3" in args:
+                rc, output = 2, private
+            else:
+                self.fail("unexpected diagnostic command")
+            return mock.Mock(returncode=rc, stdout=output.encode(), stderr=private.encode())
+        with mock.patch.object(guest, "owner_command", side_effect=lambda args: ["setpriv", *args]), mock.patch.object(guest.subprocess, "run", side_effect=command) as run, mock.patch.object(guest.os, "access", return_value=False):
+            guest.stage("install-http-health")
+            value = guest.install_runtime_snapshot()
+        self.assertEqual(guest.phase, "install-http-health")
+        self.assertEqual(value["postgresReadiness"], "accepting")
+        self.assertEqual(value["serverDatabaseDns"], "failed")
+        self.assertEqual(value["networkBackend"], "netavark")
+        self.assertFalse(value["networkDnsEnabled"])
+        self.assertFalse(value["aardvark-dnsExecutable"])
+        self.assertEqual(value["services"]["server"], {"activeState": "active", "unitResult": "success",
+                         "mainExitCode": 0, "containerState": "running", "containerExitCode": 0, "oomKilled": False})
+        self.assertNotIn(private, json.dumps(value))
+        self.assertEqual(len(run.call_args_list), 10)
+        for call in run.call_args_list:
+            self.assertLessEqual(call.kwargs["timeout"], 2)
+            self.assertEqual(call.kwargs["cwd"], guest.HOME)
+            self.assertFalse({"start", "restart", "stop", "rm", "logs", "login", "journalctl"} & set(call.args[0]))
+        self.assertEqual(host.safe_install_runtime(value), value)
+        self.assertEqual(host.RUNTIME_STATES, guest.RUNTIME_STATES)
+        self.assertEqual(host.RUNTIME_COMPONENTS, guest.RUNTIME_COMPONENTS)
+
+    def test_probe_timeout_and_expired_budget_leave_unavailable_without_extra_commands(self):
+        with mock.patch.object(guest, "owner_command", side_effect=lambda args: args), mock.patch.object(guest.time, "monotonic", side_effect=[0, 0] + [21] * 20), mock.patch.object(guest.subprocess, "run", side_effect=subprocess.TimeoutExpired("synthetic-private", 2)) as run, mock.patch.object(guest.os, "access", return_value=False):
+            value = guest.install_runtime_snapshot()
+        run.assert_called_once()
+        self.assertEqual(value["postgresReadiness"], "unavailable")
+        self.assertEqual(value["serverDatabaseDns"], "unavailable")
+        self.assertIsNone(value["networkDnsEnabled"])
+        self.assertEqual(value["services"]["server"]["activeState"], "unavailable")
+        self.assertNotIn("synthetic-private", json.dumps(value))
+
+    def test_snapshot_never_runs_for_other_stages_guard_failure_or_second_boot(self):
+        for action, code, guard_fails in (("prepare", "install-runner-build", False),
+                                          ("verify", "install-http-health", False),
+                                          ("prepare", "install-http-health", True)):
+            def failed(*_args, failure_code=code):
+                guest.stage(failure_code)
+                raise guest.Failure()
+            with mock.patch.object(guest, "guard", side_effect=failed if guard_fails else None), mock.patch.object(guest, action, side_effect=failed), mock.patch.object(guest, "install_runtime_snapshot") as snapshot, mock.patch.object(guest.sys, "argv", ["guest", action, NONCE, HEAD, SOURCE_HASH]), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                self.assertEqual(guest.main(), 1)
+            snapshot.assert_not_called()
+            self.assertNotIn("installRuntime", json.loads(output.getvalue()))
+
+    def test_diagnostic_failure_keeps_original_failure_without_exception_text(self):
+        def failed(*_args):
+            guest.stage("install-http-health")
+            raise guest.Failure()
+        with mock.patch.object(guest, "guard"), mock.patch.object(guest, "prepare", side_effect=failed), mock.patch.object(guest, "install_runtime_snapshot", side_effect=OSError("synthetic-private")), mock.patch.object(guest.sys, "argv", ["guest", "prepare", NONCE, HEAD, SOURCE_HASH]), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(guest.main(), 1)
+        value = json.loads(output.getvalue())
+        self.assertEqual(value["failureCode"], "install-http-health")
+        self.assertNotIn("synthetic-private", output.getvalue())
+        self.assertIsNone(value["installRuntime"])
+
+    def test_host_rebuilds_schema_and_rejects_wrong_stage_or_stale_observations(self):
+        raw = {"services": {"server": {"activeState": "active", "unitResult": "synthetic-private",
+               "containerState": [], "mainExitCode": True, "containerExitCode": 999,
+               "oomKilled": "false", "environment": "synthetic-private"}, "synthetic-private": {}},
+               "networkBackend": [], "networkDnsEnabled": "synthetic-private", "postgresReadiness": "accepting",
+               "serverDatabaseDns": "failed", "private": "synthetic-private"}
+        safe = host.safe_install_runtime(raw)
+        self.assertNotIn("synthetic-private", json.dumps(safe))
+        self.assertEqual(set(safe["services"]), set(host.RUNTIME_COMPONENTS))
+        self.assertEqual(safe["services"]["server"]["activeState"], "active")
+        self.assertEqual(safe["services"]["server"]["unitResult"], "unavailable")
+        self.assertIsNone(safe["services"]["server"]["mainExitCode"])
+        self.assertIsNone(safe["services"]["server"]["oomKilled"])
+        controller = host.Controller()
+        controller.nonce, controller.head, controller.source_hash = NONCE, HEAD, SOURCE_HASH
+        for action, code, isolation, expected in (("prepare", "install-http-health", True, True),
+                                                 ("verify", "install-http-health", True, False),
+                                                 ("prepare", "retention", True, False),
+                                                 ("prepare", "install-http-health", False, False)):
+            value = {"ok": False, "failureCode": code, "ownerSshState": "empty-authorized-keys",
+                     "ownerSshIsolationVerified": isolation, "installRuntime": raw}
+            controller.result["installRuntime"] = safe
+            with mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=1, stdout=json.dumps(value))), self.assertRaises(host.Failure):
+                controller.guest(action)
+            self.assertEqual("installRuntime" in controller.result, expected)
+            self.assertNotIn("synthetic-private", json.dumps(controller.result))
+        for invalid in (None, [], "synthetic-private"):
+            self.assertIsNone(host.safe_install_runtime(invalid))
 
 
 class SourceTests(unittest.TestCase):

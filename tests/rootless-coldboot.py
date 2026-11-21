@@ -39,7 +39,7 @@ GUEST_CODES = frozenset({"guest-guard", "guest-guard-runtime", "guest-guard-argu
                          "guest-guard-instance", "guest-guard-release", "guest-guard-owner",
                          "guest-guard-home", "guest-guard-owner-ssh", "guest-guard-controller",
                          "guest-guard-owner-locked", "guest-guard-sshd",
-                         "freshness", "guest-packages", "source", "linger",
+                         "freshness", "guest-packages", "guest-network-tools", "source", "linger",
                          "install", "initial-health", "prepare-profiles", "initial-smoke",
                          "identity", "poweroff", "boot-identity", "manager-before-owner",
                          "health-before-owner", "timer", "retention", "runtime-receipt"})
@@ -57,6 +57,14 @@ GUEST_SSH_STATES = GUEST_SSH_EMPTY_STATES | {"unavailable", "unsafe-directory", 
                                           "unsafe-authorized-keys", "nonempty-authorized-keys"}
 
 
+RUNTIME_COMPONENTS = ("postgres", "server", "runner")
+RUNTIME_STATES = {
+    "activeState": {"active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance"},
+    "unitResult": {"success", "exit-code", "signal", "core-dump", "timeout", "start-limit-hit", "resources",
+                   "protocol", "watchdog", "oom-kill", "condition"},
+    "containerState": {"configured", "created", "running", "stopped", "paused", "exited", "removing", "stopping"},
+}
+
 class Failure(Exception):
     pass
 
@@ -64,6 +72,38 @@ class Failure(Exception):
 def require(ok):
     if not ok:
         raise Failure()
+
+
+def safe_install_runtime(value):
+    if not isinstance(value, dict):
+        return None
+    # Rebuild the fixed schema; unknown fields/strings and malformed values cannot
+    # enter the artifact. These observations never change acceptance to passed.
+    result = {"services": {}}
+    services = value.get("services")
+    services = services if isinstance(services, dict) else {}
+    for name in RUNTIME_COMPONENTS:
+        raw = services.get(name)
+        raw = raw if isinstance(raw, dict) else {}
+        item = {}
+        for key, allowed in RUNTIME_STATES.items():
+            field = raw.get(key)
+            item[key] = field if isinstance(field, str) and field in allowed else "unavailable"
+        for key in ("mainExitCode", "containerExitCode"):
+            field = raw.get(key)
+            item[key] = field if type(field) is int and 0 <= field <= 255 else None
+        field = raw.get("oomKilled")
+        item["oomKilled"] = field if type(field) is bool else None
+        result["services"][name] = item
+    for key in ("networkDnsEnabled", "netavarkExecutable", "aardvark-dnsExecutable"):
+        field = value.get(key)
+        result[key] = field if type(field) is bool else None
+    for key, allowed in (("networkBackend", {"netavark", "cni"}),
+                         ("postgresReadiness", {"accepting", "rejecting", "no-response"}),
+                         ("serverDatabaseDns", {"resolved", "failed"})):
+        field = value.get(key)
+        result[key] = field if isinstance(field, str) and field in allowed else "unavailable"
+    return result
 
 
 def digest(path):
@@ -555,6 +595,7 @@ class Controller:
         self.result["ownerSshIsolationVerified"] = (value.get("ownerSshIsolationVerified") is True
                                                    and self.result["ownerSshState"] in GUEST_SSH_EMPTY_STATES)
         self.result.pop("installerFailure", None)
+        self.result.pop("installRuntime", None)
         if result.returncode != 0 or value.get("ok") is not True:
             code = value.get("failureCode")
             if isinstance(code, str) and code in GUEST_CODES:
@@ -568,6 +609,10 @@ class Controller:
                         and isinstance(signature, str) and signature in INSTALL_SIGNATURES):
                     self.result["installerFailure"] = {"failureCode": code, "exitCode": exit_code,
                                                        "signature": signature}
+            if phase == "prepare" and code == "install-http-health" and self.result["ownerSshIsolationVerified"]:
+                runtime = safe_install_runtime(value.get("installRuntime"))
+                if runtime is not None:
+                    self.result["installRuntime"] = runtime
             raise Failure()
         require(self.result["ownerSshIsolationVerified"])
         return value

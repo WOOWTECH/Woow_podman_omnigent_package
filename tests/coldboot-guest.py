@@ -34,6 +34,14 @@ owner_ssh_observation = "unavailable"
 installer_observation = None
 
 
+RUNTIME_COMPONENTS = ("postgres", "server", "runner")
+RUNTIME_STATES = {
+    "activeState": {"active", "reloading", "inactive", "failed", "activating", "deactivating", "maintenance"},
+    "unitResult": {"success", "exit-code", "signal", "core-dump", "timeout", "start-limit-hit", "resources",
+                   "protocol", "watchdog", "oom-kill", "condition"},
+    "containerState": {"configured", "created", "running", "stopped", "paused", "exited", "removing", "stopping"},
+}
+
 class Failure(Exception):
     pass
 
@@ -290,8 +298,14 @@ def prepare(head, source_hash):
     stage("guest-packages")
     run(["apt-get", "update", "-o", "Acquire::Retries=2", "-o", "Acquire::http::Timeout=30"], timeout=180)
     run(["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y", "--no-install-recommends",
-         "podman", "uidmap", "slirp4netns", "fuse-overlayfs", "dbus-user-session", "curl", "jq", "git"], timeout=240)
+         "podman", "netavark", "aardvark-dns", "uidmap", "slirp4netns", "fuse-overlayfs",
+         "dbus-user-session", "curl", "jq", "git"], timeout=240)
     require(re.match(r"podman version 4\.9\.", run(["podman", "--version"])) is not None)
+    # Noble only recommends aardvark-dns. This minimal guest needs it explicitly:
+    # server -> postgres and runner -> server use names on the package network.
+    stage("guest-network-tools")
+    for tool in ("netavark", "aardvark-dns"):
+        require(run(["/usr/lib/podman/" + tool, "--version"]).startswith(tool + " "))
     run(["apt-get", "clean"])
     stage("source")
     extract_source(Path("/home/coldboot-controller/source.tar"), head, source_hash)
@@ -372,6 +386,61 @@ def poweroff(head, source_hash):
     return {"ok": True}
 
 
+def install_runtime_snapshot():
+    # First-boot HTTP-install failure only. No logs, credentials, IPs or starts.
+    # Ten commands, each at most two seconds, share a twenty-second deadline.
+    deadline = time.monotonic() + 20
+    def probe(args):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            return subprocess.run(owner_command(args), capture_output=True, check=False,
+                                  cwd=HOME, timeout=min(2, remaining))
+        except (OSError, subprocess.SubprocessError):
+            return None
+    def output(args):
+        result = probe(args)
+        return result.stdout.decode(errors="replace").strip() if result and result.returncode == 0 else ""
+    def state(key, value):
+        return value if value in RUNTIME_STATES[key] else "unavailable"
+    def number(value):
+        return int(value) if value.isascii() and value.isdecimal() and len(value) <= 3 and int(value) <= 255 else None
+    def outcome(args, values):
+        result = probe(args)
+        return values.get(result.returncode, "unavailable") if result else "unavailable"
+    snapshot = {"services": {}}
+    for name in RUNTIME_COMPONENTS:
+        container = "omnigent-" + name
+        raw = output(["systemctl", "--user", "show", container + ".service", "--property=ActiveState,Result,ExecMainStatus"])
+        unit = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+        raw = output(["podman", "inspect", "--format", "{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}", container])
+        fields = raw.split("|") if raw.count("|") == 2 else ["", "", ""]
+        snapshot["services"][name] = {
+            "activeState": state("activeState", unit.get("ActiveState", "")),
+            "unitResult": state("unitResult", unit.get("Result", "")),
+            "mainExitCode": number(unit.get("ExecMainStatus", "")),
+            "containerState": state("containerState", fields[0]), "containerExitCode": number(fields[1]),
+            "oomKilled": {"true": True, "false": False}.get(fields[2]),
+        }
+    backend = output(["podman", "info", "--format", "{{.Host.NetworkBackend}}"])
+    snapshot["networkBackend"] = backend if backend in {"netavark", "cni"} else "unavailable"
+    dns = output(["podman", "network", "inspect", "omnigent", "--format", "{{.DNSEnabled}}"])
+    snapshot["networkDnsEnabled"] = {"true": True, "false": False}.get(dns)
+    snapshot["postgresReadiness"] = outcome(
+        ["podman", "exec", "omnigent-postgres", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "omnigent", "-d", "omnigent"],
+        {0: "accepting", 1: "rejecting", 2: "no-response"})
+    # Resolve only the owned database name inside the owned server; print nothing.
+    code = ("import socket,sys\ntry: socket.getaddrinfo('omnigent-postgres',5432,type=socket.SOCK_STREAM)\n"
+            "except socket.gaierror: sys.exit(2)\n")
+    snapshot["serverDatabaseDns"] = outcome(
+        ["podman", "exec", "--env", "RES_OPTIONS=attempts:1 timeout:1", "omnigent-server", "python3", "-c", code],
+        {0: "resolved", 2: "failed"})
+    for tool in ("netavark", "aardvark-dns"):
+        snapshot[tool + "Executable"] = os.access("/usr/lib/podman/" + tool, os.X_OK)
+    return snapshot
+
+
 def main():
     global owner_ssh_observation, installer_observation
     owner_ssh_observation = "unavailable"
@@ -391,6 +460,11 @@ def main():
                  "ownerSshIsolationVerified": guard_passed}
         if installer_observation is not None:
             value["installerFailure"] = installer_observation
+        if guard_passed and action == "prepare" and phase == "install-http-health":
+            try:
+                value["installRuntime"] = install_runtime_snapshot()
+            except Exception:  # noqa: BLE001 -- preserve the original failure and cleanup
+                value["installRuntime"] = None
         print(json.dumps(value))
         return 1
     value.update(ownerSshState=owner_ssh_observation, ownerSshIsolationVerified=guard_passed)
