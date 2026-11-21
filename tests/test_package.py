@@ -66,6 +66,50 @@ class ReceiptTests(unittest.TestCase):
             exec(verify.RUNTIME_PROBE, {})
         self.assertEqual(json.loads(output.getvalue())["coreVersion"], "0.21.0")
 
+    def test_image_probe_inspects_requested_docker_platform(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        receipt_path = self.repo / "server-image.json"
+        receipt_path.write_text(json.dumps(self.receipt))
+        for engine in ("docker", "podman"):
+            for arch in ("amd64", "arm64"):
+                with self.subTest(engine=engine, arch=arch):
+                    calls = []
+                    platform = "linux/" + arch
+                    info = copy.deepcopy(self.info)
+                    info["Architecture"] = arch
+
+                    def engine_command(*args, **kwargs):
+                        calls.append(args)
+                        if args[1] == "run":
+                            self.assertIn(platform, args)
+                            return json.dumps(self.runtime)
+                        if args[1:3] == ("image", "inspect"):
+                            # Docker's containerd store can return empty config when
+                            # the host platform is absent from a foreign-platform pull.
+                            if engine == "docker" and "--platform" not in args:
+                                return json.dumps([{"Config": {}, "Architecture": ""}])
+                            return json.dumps([info])
+                        return ""
+
+                    argv = ["verify", "--engine", engine, "--image", "--platform", platform,
+                            "--receipt", str(receipt_path)]
+                    with patch.object(verify, "REPO", self.repo), \
+                         patch.object(verify, "command", side_effect=engine_command), \
+                         patch("sys.argv", argv), \
+                         contextlib.redirect_stdout(io.StringIO()), \
+                         contextlib.redirect_stderr(io.StringIO()) as errors:
+                        self.assertEqual(verify.main(), 0, errors.getvalue())
+                    inspect = next(call for call in calls if call[1:3] == ("image", "inspect"))
+                    if engine == "docker":
+                        self.assertEqual(inspect[3:5], ("--platform", platform))
+                    else:
+                        # Podman 4.9 image inspect does not support --platform.
+                        self.assertNotIn("--platform", inspect)
+                    self.assertEqual(inspect[-1], self.receipt["image"])
+
     def test_package_revision_is_independent_of_woow_image_tag(self):
         (self.repo / "VERSION").write_text("0.21.0-17\n")
         (self.repo / "quadlet/omnigent-runner.container").write_text("Image=localhost/woow-omnigent-runner:0.21.0-17\n")

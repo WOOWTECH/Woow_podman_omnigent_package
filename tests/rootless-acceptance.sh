@@ -99,7 +99,7 @@ run_stage() {
 preflight() {
   podman --version | grep -E '^podman version 4\.9\.'
   [[ $(podman info --format '{{.Host.Security.Rootless}}') == true ]]
-  [[ $(podman info --format '{{.Host.CgroupVersion}}') == v2 ]]
+  [[ $(podman info --format '{{.Host.CgroupsVersion}}') == v2 ]]
   systemctl --user show-environment >/dev/null
   [[ $(loginctl show-user "$(id -un)" -p Linger --value) == yes ]]
 }

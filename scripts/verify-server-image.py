@@ -132,7 +132,11 @@ def main():
                 image_id = receipt["image"]
                 probe = command(engine, "run", "--rm", "-i", *platform, "--network=none", "--read-only",
                                 "--entrypoint=/opt/venv/bin/python", receipt["image"], "-", receipt["sourceCommit"], input=RUNTIME_PROBE)
-            info = json.loads(command(engine, "image", "inspect", image_id))[0]
+            # Docker's containerd store otherwise inspects the host platform,
+            # even after a successful foreign-platform pull/run. Podman 4.9
+            # has no image-inspect platform flag and resolves the pulled image.
+            inspect_platform = ["--platform", args.platform] if engine == "docker" and args.platform else []
+            info = json.loads(command(engine, "image", "inspect", *inspect_platform, image_id))[0]
             check_runtime(receipt, info, json.loads(probe))
             if args.platform:
                 require(info["Architecture"] == args.platform.split("/")[1], "runtime architecture differs from requested platform")

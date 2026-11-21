@@ -137,6 +137,31 @@ class HarnessGuardTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(marker.exists())
 
+    def test_preflight_uses_podman49_template_fields_and_rejects_unsupported_hosts(self):
+        source = (REPO / "tests/rootless-acceptance.sh").read_text()
+        function = "preflight() {" + source.split("preflight() {", 1)[1].split("\nrun_stage preflight", 1)[0]
+        # Podman 4.9's Go field is CgroupsVersion; its JSON key is cgroupVersion.
+        # Reject unknown templates as the real CLI does, and retain host guards.
+        doubles = r'''podman() {
+  if [[ $1 == --version ]]; then printf 'podman version 4.9.3\n'; return; fi
+  [[ $1 == info && $2 == --format ]] || return 125
+  case $3 in
+    '{{.Host.Security.Rootless}}') printf '%s\n' "$fixture_rootless" ;;
+    '{{.Host.CgroupsVersion}}') printf '%s\n' "$fixture_cgroups" ;;
+    *) return 125 ;;
+  esac
+}
+systemctl() { [[ $* == '--user show-environment' ]]; }
+loginctl() { printf 'yes\n'; }
+id() { printf 'fixture-user\n'; }
+'''
+        command = "set -euo pipefail\nfixture_rootless=$1\nfixture_cgroups=$2\n" + doubles + function + "\npreflight\n"
+        for rootless, cgroups, succeeds in (("true", "v2", True), ("false", "v2", False), ("true", "v1", False)):
+            with self.subTest(rootless=rootless, cgroups=cgroups):
+                result = subprocess.run(["bash", "-c", command, "fixture", rootless, cgroups],
+                                        text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+
     def test_http_fixture_refuses_external_targets(self):
         with self.assertRaisesRegex(ValueError, "loopback"):
             rootless.request("https://external.invalid/mcp/private_synthetic")
