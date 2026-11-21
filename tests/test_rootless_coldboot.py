@@ -238,8 +238,9 @@ class BootDiagnosticsTests(unittest.TestCase):
                 kwargs["stderr"].write(b"Could not access KVM kernel module: Permission denied\nprivate-fixture-token\n")
                 kwargs["stderr"].flush()
                 return probe
-            with mock.patch.object(host.subprocess, "Popen", side_effect=launch_probe), mock.patch.object(controller, "preflight", side_effect=controller.probe_qemu_kvm), mock.patch.object(controller, "prepare") as prepare, mock.patch.object(controller, "boot") as boot, mock.patch("builtins.print"), self.assertRaises(host.Failure):
+            with mock.patch.object(host.subprocess, "Popen", side_effect=launch_probe), mock.patch.object(controller, "preflight", side_effect=controller.probe_qemu_kvm), mock.patch.object(controller, "diagnose_kvm_access") as diagnose, mock.patch.object(controller, "prepare") as prepare, mock.patch.object(controller, "boot") as boot, mock.patch("builtins.print"), self.assertRaises(host.Failure):
                 controller.acceptance()
+            diagnose.assert_called_once_with()
             prepare.assert_not_called()
             boot.assert_not_called()
             probe.terminate.assert_not_called()
@@ -433,6 +434,98 @@ class BootDiagnosticsTests(unittest.TestCase):
             self.assertEqual(launch.call_args.kwargs["env"]["LC_ALL"], "C")
             self.assertEqual(ssh.call_args_list[0].args[0], ["true"])
             self.assertEqual(ssh.call_args_list[1].args[0], ["sudo", "-n", "cloud-init", "status", "--wait"])
+
+
+class KvmAccessDifferentialTests(unittest.TestCase):
+    def test_snapshot_captures_effective_access_and_device_metadata(self):
+        info = mock.Mock(st_dev=1, st_ino=2, st_rdev=3, st_mode=4, st_uid=5, st_gid=6)
+        with mock.patch.object(host.Path, "stat", return_value=info), mock.patch.object(host.subprocess, "run", return_value=mock.Mock(stdout=b"acl")), mock.patch.object(host.os, "access", return_value=False) as access:
+            self.assertEqual(host.kvm_access_snapshot(), ((1, 2, 3, 4, 5, 6), b"acl", False))
+        access.assert_called_once_with("/dev/kvm", os.R_OK | os.W_OK, effective_ids=True)
+
+    def test_binary_identity_hashes_resolved_file_and_refuses_nonregular_or_large(self):
+        with tempfile.TemporaryDirectory() as folder:
+            binary = Path(folder) / "fixture-qemu"
+            binary.write_bytes(b"synthetic executable bytes")
+            link = Path(folder) / "symlink-qemu"
+            link.symlink_to(binary)
+            self.assertEqual(host.qemu_binary_sha256(link), host.digest(binary))
+            with self.assertRaises(host.Failure):
+                host.qemu_binary_sha256(Path(folder))
+            with mock.patch.object(host.Path, "stat", return_value=mock.Mock(st_mode=0o100755, st_size=129 * 1024 ** 2)), self.assertRaises(host.Failure):
+                host.qemu_binary_sha256(binary)
+
+    def test_parent_probe_publishes_only_static_status(self):
+        with mock.patch.object(host, "kvm_probe"):
+            self.assertEqual(host.kvm_probe_status(), "passed")
+        for error, expected in ((PermissionError(13, "private-fixture"), "EACCES"),
+                                (OSError(16, "private-fixture"), "EBUSY"),
+                                (host.Failure(), "api-rejected")):
+            with mock.patch.object(host, "kvm_probe", side_effect=error):
+                self.assertEqual(host.kvm_probe_status(), expected)
+
+    def test_matching_audit_requires_owned_pid_exact_device_and_denial(self):
+        line = b'apparmor="DENIED" operation="open" profile="private-fixture" name="/dev/kvm" pid=123 comm="qemu-system-x86"'
+        self.assertTrue(host.kvm_apparmor_denial(line, 123))
+        for changed in (line.replace(b"pid=123", b"pid=1234"),
+                        line.replace(b"/dev/kvm", b"/dev/kvm-other"),
+                        line.replace(b'"DENIED"', b'"ALLOWED"'),
+                        line.replace(b'"open"', b'"file_mmap"')):
+            self.assertFalse(host.kvm_apparmor_denial(changed, 123))
+
+    def test_differential_retains_denial_without_permission_or_startup_changes(self):
+        controller = host.Controller()
+        controller.probe_proc = mock.Mock(pid=123)
+        controller.kvm_access_before = ("device-identity", b"acl", True)
+        controller.stage = "qemu-kvm-init"
+        audit = b'apparmor="DENIED" operation="open" profile="private-fixture" name="/dev/kvm" pid=123'
+        responses = [mock.Mock(returncode=0, stdout=b"passed\n"), mock.Mock(returncode=0, stdout=audit)]
+        with mock.patch.object(host, "kvm_probe_status", return_value="passed"), mock.patch.object(host, "kvm_access_snapshot", return_value=controller.kvm_access_before), mock.patch.object(host, "qemu_binary_sha256", return_value=SOURCE_HASH), mock.patch.object(host.shutil, "which", return_value="/usr/bin/qemu-system-x86_64"), mock.patch.object(host.os.path, "samefile", return_value=True), mock.patch.object(controller, "run", side_effect=responses) as run:
+            controller.diagnose_kvm_access()
+        value = controller.result["qemuAccessDifferential"]
+        self.assertEqual(value, {"parentProbe": "passed", "childProbe": "passed", "deviceUnchanged": True,
+                                 "aclUnchanged": True, "effectiveAccessBefore": True, "effectiveAccessAfter": True,
+                                 "systemBinary": True, "binarySha256": SOURCE_HASH, "kernelAudit": "apparmor-denied"})
+        self.assertNotIn("private-fixture", json.dumps(controller.result))
+        self.assertEqual(controller.stage, "qemu-kvm-init")
+        self.assertEqual(controller.result["status"], "failed")
+        self.assertNotIn("qemuKvmProbeVerified", controller.result)
+        self.assertEqual(run.call_args_list[0].args[0][1], "-c")
+        self.assertNotIn("sudo", run.call_args_list[0].args[0])
+        self.assertEqual(run.call_args_list[1].args[0][:3], ["sudo", "-n", "journalctl"])
+        self.assertTrue(all(call.kwargs["timeout"] <= 5 for call in run.call_args_list))
+
+    def test_incomplete_diagnostic_is_withheld_and_cannot_mask_original_failure(self):
+        controller = host.Controller()
+        controller.probe_proc = mock.Mock(pid=123)
+        controller.stage = "qemu-kvm-init"
+        responses = [mock.Mock(returncode=0, stdout=b"private-fixture\n"), mock.Mock(returncode=1, stdout=b"private-fixture")]
+        with mock.patch.object(host, "kvm_probe_status", return_value="EACCES"), mock.patch.object(host, "kvm_access_snapshot", side_effect=OSError), mock.patch.object(host.shutil, "which", return_value=None), mock.patch.object(controller, "run", side_effect=responses):
+            controller.diagnose_kvm_access()
+        value = controller.result["qemuAccessDifferential"]
+        self.assertEqual(value["parentProbe"], "EACCES")
+        self.assertEqual(value["childProbe"], "unavailable")
+        self.assertEqual(value["kernelAudit"], "unavailable")
+        self.assertIsNone(value["systemBinary"])
+        self.assertIsNone(value["deviceUnchanged"])
+        self.assertNotIn("private-fixture", json.dumps(value))
+        self.assertEqual(controller.stage, "qemu-kvm-init")
+
+    def test_changed_access_and_failed_child_cannot_look_successful(self):
+        controller = host.Controller()
+        controller.probe_proc = mock.Mock(pid=123)
+        controller.kvm_access_before = ("old-device", b"old-acl", True)
+        responses = [mock.Mock(returncode=1, stdout=b"passed\n"), mock.Mock(returncode=0, stdout=b"")]
+        with mock.patch.object(host, "kvm_probe_status", return_value="EACCES"), mock.patch.object(host, "kvm_access_snapshot", return_value=("new-device", b"new-acl", False)), mock.patch.object(host, "qemu_binary_sha256", return_value=SOURCE_HASH), mock.patch.object(host.shutil, "which", return_value="/other/qemu"), mock.patch.object(host.os.path, "samefile", return_value=False), mock.patch.object(controller, "run", side_effect=responses):
+            controller.diagnose_kvm_access()
+        value = controller.result["qemuAccessDifferential"]
+        self.assertFalse(value["deviceUnchanged"])
+        self.assertFalse(value["aclUnchanged"])
+        self.assertTrue(value["effectiveAccessBefore"])
+        self.assertFalse(value["effectiveAccessAfter"])
+        self.assertFalse(value["systemBinary"])
+        self.assertEqual(value["childProbe"], "unavailable")
+        self.assertEqual(value["kernelAudit"], "not-observed")
 
 
 class GuestGateTests(unittest.TestCase):

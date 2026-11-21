@@ -4,6 +4,7 @@
 Raw output, keys, fixture tokens and disk images remain in an owned 0700 directory.
 Only the fixed-schema receipt leaves it. No emulation fallback or owner SSH login.
 """
+import errno
 import fcntl
 import hashlib
 import json
@@ -32,6 +33,7 @@ GUEST_SCRIPT = "/usr/local/lib/omnigent-coldboot-guest.py"
 # The same binary/default machine and KVM/CPU/RAM settings serve probe and boot.
 QEMU_MACHINE_ARGS = ("qemu-system-x86_64", "-accel", "kvm", "-cpu", "host",
                      "-smp", "2", "-m", "6144")
+KVM_PROBE_STATUSES = frozenset({"passed", "api-rejected", "unknown-error", *errno.errorcode.values()})
 GUEST_CODES = frozenset({"guest-guard", "freshness", "guest-packages", "source", "linger",
                          "install", "initial-health", "prepare-profiles", "initial-smoke",
                          "identity", "poweroff", "boot-identity", "manager-before-owner",
@@ -92,6 +94,38 @@ def kvm_probe():
         vm_fd = fcntl.ioctl(device, 0xAE01, 0)       # KVM_CREATE_VM; no TCG fallback
         require(vm_fd >= 0)
         os.close(vm_fd)
+
+
+def kvm_probe_status():
+    try:
+        kvm_probe()
+        return "passed"
+    except OSError as error:
+        return errno.errorcode.get(error.errno, "unknown-error")
+    except Failure:
+        return "api-rejected"
+
+
+def kvm_access_snapshot():
+    info = Path("/dev/kvm").stat()
+    identity = (info.st_dev, info.st_ino, info.st_rdev, info.st_mode, info.st_uid, info.st_gid)
+    acl = subprocess.run(["getfacl", "-cpn", "/dev/kvm"], capture_output=True, check=True, timeout=5).stdout
+    effective_access = os.access("/dev/kvm", os.R_OK | os.W_OK, effective_ids=True)
+    return identity, acl, effective_access
+
+
+def qemu_binary_sha256(binary):
+    resolved = Path(binary).resolve(strict=True)
+    info = resolved.stat()
+    require(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 128 * 1024 ** 2)
+    return digest(resolved)
+
+
+def kvm_apparmor_denial(log, pid):
+    # No profile names, kernel output or process metadata leave this predicate.
+    return any(all(part in line for part in (b'apparmor="DENIED"', b'operation="open"', b'name="/dev/kvm"'))
+               and re.search(rb"\bpid=" + str(pid).encode("ascii") + rb"(?:\s|$)", line) is not None
+               for line in log.splitlines())
 
 
 def qemu_stderr_diagnostic(stderr):
@@ -188,6 +222,7 @@ class Controller:
         self.report_parent = None
         self.proc = None
         self.probe_proc = None
+        self.kvm_access_before = None
         self.acl = None
         self.completed = []
         self.deadline = time.monotonic() + 36 * 60
@@ -253,6 +288,7 @@ class Controller:
         require(stat.S_ISCHR(Path("/dev/kvm").stat().st_mode))
         self.acl = self.run(["getfacl", "-p", "/dev/kvm"]).stdout
         self.run(["sudo", "-n", "setfacl", "-m", f"u:{os.getuid()}:rw", "/dev/kvm"])
+        self.kvm_access_before = kvm_access_snapshot()
         self.done()
         self.stage_start("kvm-create-vm")
         kvm_probe()
@@ -293,11 +329,55 @@ class Controller:
                 exit_code = self.probe_proc.poll()
             if exit_code is not None:
                 self.record_qemu_exit(exit_code, probe=True)
+                if {"operation": "open", "errno": "EACCES"} in self.result["qemuKvmDiagnostics"]:
+                    self.diagnose_kvm_access()
                 raise Failure()
         finally:
             self.stop_qemu_probe()
         self.result["qemuKvmProbeVerified"] = True
         self.done()
+
+    def diagnose_kvm_access(self):
+        # Failure-only differential; never changes ACLs, executes QEMU as root,
+        # selects another accelerator, retries acceptance or turns a failure green.
+        value = {"parentProbe": kvm_probe_status(), "childProbe": "unavailable",
+                 "deviceUnchanged": None, "aclUnchanged": None,
+                 "effectiveAccessBefore": self.kvm_access_before[2] if self.kvm_access_before else None,
+                 "effectiveAccessAfter": None, "systemBinary": None,
+                 "binarySha256": None, "kernelAudit": "unavailable"}
+        self.result["qemuAccessDifferential"] = value
+        try:
+            code = "import runpy,sys; print(runpy.run_path(sys.argv[1])['kvm_probe_status']())"
+            child = self.run([sys.executable, "-c", code, str(Path(__file__).resolve())],
+                             timeout=5, check=False)
+            status = child.stdout.decode("ascii").strip()
+            if child.returncode == 0 and status in KVM_PROBE_STATUSES:
+                value["childProbe"] = status
+        except (Failure, OSError, ValueError, subprocess.SubprocessError):
+            pass
+        try:
+            after = kvm_access_snapshot()
+            value["effectiveAccessAfter"] = after[2]
+            if self.kvm_access_before is not None:
+                value["deviceUnchanged"] = after[0] == self.kvm_access_before[0]
+                value["aclUnchanged"] = after[1] == self.kvm_access_before[1]
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            binary = shutil.which(QEMU_MACHINE_ARGS[0])
+            if binary:
+                value["systemBinary"] = os.path.samefile(binary, "/usr/bin/qemu-system-x86_64")
+                value["binarySha256"] = qemu_binary_sha256(binary)
+        except (Failure, OSError):
+            pass
+        try:
+            audit = self.run(["sudo", "-n", "journalctl", "-k", "--no-pager", "-o", "cat",
+                              "-n", "200", "--since=-1min"], timeout=5, check=False)
+            if audit.returncode == 0:
+                value["kernelAudit"] = ("apparmor-denied" if kvm_apparmor_denial(audit.stdout, self.probe_proc.pid)
+                                        else "not-observed")
+        except (Failure, OSError, subprocess.SubprocessError):
+            pass
 
     def prepare(self):
         self.stage_start("verified-image-and-source")

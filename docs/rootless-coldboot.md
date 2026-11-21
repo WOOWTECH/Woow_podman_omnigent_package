@@ -80,6 +80,17 @@ physical-host coldboot remains a separate deployment acceptance criterion.
   Early exit uses the same safe operation/errno diagnostics. A passing
   `qemuKvmProbeVerified` proves only this startup probe, never guest coldboot or
   retention. The full guest poweroff/new-process/retention checks remain required.
+- If that QEMU probe reports `open` / `EACCES`, a failure-only comparison repeats
+  the ioctl probe in the controller and a fresh Python child, checks whether the
+  device identity/permissions and granted ACL changed, and records effective
+  read/write access before and after the failure. It checks whether PATH selected
+  the system QEMU binary and hashes its resolved regular file. A bounded kernel
+  journal query checks for an AppArmor denial of `/dev/kvm` tied to that owned
+  QEMU PID. Only fixed statuses, booleans and the binary SHA-256 enter
+  `qemuAccessDifferential`; raw ACLs, profile names and kernel logs stay private.
+  Missing diagnostics are `unavailable`/null; `not-observed`
+  is not proof that confinement is absent. The job stays failed, without changing
+  permissions, disabling confinement or launching QEMU with extra privileges.
 
 ## Resource and time bounds
 
