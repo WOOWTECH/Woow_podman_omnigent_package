@@ -152,7 +152,8 @@ class OwnershipTests(unittest.TestCase):
         controller.work, controller.parent = self.path, self.parent
         controller.nonce, controller.identity = NONCE, self.identity
         controller.acl = b"saved ACL"
-        with mock.patch.object(host.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "setfacl")), self.assertRaises(host.Failure):
+        controller.kvm_original_identity = (1, 2, 3, 0, 108)
+        with mock.patch.object(host, "kvm_device_identity", return_value=controller.kvm_original_identity), mock.patch.object(host.subprocess, "run", side_effect=[mock.Mock(returncode=0), subprocess.CalledProcessError(1, "setfacl")]), self.assertRaises(host.Failure):
             controller.cleanup()
         self.assertFalse(self.path.exists())
         self.assertEqual(controller.result["cleanupFailureCodes"], ["cleanup-kvm-acl"])
@@ -204,6 +205,12 @@ class KvmAndTransportTests(unittest.TestCase):
 
 
 class BootDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        # Separate lifecycle tests exercise the real refresh with mocked OS calls.
+        patch = mock.patch.object(host.Controller, "refresh_kvm_access")
+        self.refresh = patch.start()
+        self.addCleanup(patch.stop)
+
     def test_qemu_probe_uses_boot_machine_without_images_or_network(self):
         with tempfile.TemporaryDirectory() as folder:
             controller = self.controller(folder)
@@ -434,6 +441,226 @@ class BootDiagnosticsTests(unittest.TestCase):
             self.assertEqual(launch.call_args.kwargs["env"]["LC_ALL"], "C")
             self.assertEqual(ssh.call_args_list[0].args[0], ["true"])
             self.assertEqual(ssh.call_args_list[1].args[0], ["sudo", "-n", "cloud-init", "status", "--wait"])
+
+
+class KvmAclLifetimeTests(unittest.TestCase):
+    DEVICE = (1, 2, 3, 0o20660, 0, 108)
+    ORIGINAL = b"user::rw-\ngroup::rw-\nother::---\n"
+
+    def controller(self, folder):
+        controller = BootDiagnosticsTests.controller(self, folder)
+        controller.acl = self.ORIGINAL
+        controller.kvm_original_identity = self.DEVICE[:3] + self.DEVICE[4:]
+        controller.kvm_access_before = (self.DEVICE, self.granted_acl(), True)
+        return controller
+
+    def granted_acl(self):
+        return self.ORIGINAL + f"user:{os.getuid()}:rw-\nmask::rw-\n".encode()
+
+    def test_ioctl_close_acl_loss_is_repaired_before_probe_and_each_guest_boot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            access = {"granted": True}
+            events = []
+            def close_vm(_fd):
+                access["granted"] = False
+                events.append("ioctl-close")
+            def run(args, **kwargs):
+                if args[0] == "udevadm":
+                    self.assertEqual(args, ["udevadm", "settle", "--timeout=5"])
+                    self.assertLessEqual(kwargs["timeout"], 6)
+                    events.append("settle")
+                else:
+                    self.assertEqual(args, ["sudo", "-n", "setfacl", "-m", f"u:{os.getuid()}:rw", "/dev/kvm"])
+                    self.assertEqual(events[-1], "settle")
+                    events.append("grant")
+                    access["granted"] = True
+                return mock.Mock(returncode=0)
+            def snapshot():
+                return self.DEVICE, self.granted_acl() if access["granted"] else self.ORIGINAL, access["granted"]
+            probe = mock.Mock(poll=mock.Mock(side_effect=[None, None, 0]))
+            probe.wait.side_effect = [subprocess.TimeoutExpired("qemu", 3), 0]
+            def launch(args, **_kwargs):
+                self.assertTrue(access["granted"], "QEMU would get EACCES after ioctl close")
+                self.assertEqual(events[-1], "grant")
+                self.assertEqual(controller.kvm_access_before, snapshot())
+                events.append("launch")
+                access["granted"] = False  # VM create/close can remove named ACL again.
+                if "-S" in args:
+                    return probe
+                return mock.Mock(poll=mock.Mock(return_value=None))
+            with mock.patch("builtins.open", mock.mock_open()), mock.patch.object(host.fcntl, "ioctl", side_effect=[12, 81]), mock.patch.object(host.os, "close", side_effect=close_vm):
+                host.kvm_probe()
+            with mock.patch.object(controller, "run", side_effect=run), mock.patch.object(host, "kvm_access_snapshot", side_effect=snapshot), mock.patch.object(host.subprocess, "Popen", side_effect=launch), mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=0)), mock.patch("builtins.print"):
+                controller.probe_qemu_kvm()
+                controller.stage = "initial-guest-install"
+                controller.boot()
+                controller.proc.poll.return_value = 0  # First guest powered off.
+                controller.stage = "new-qemu-coldboot"
+                controller.boot()
+            self.assertEqual(events, ["ioctl-close"] + ["settle", "grant", "launch"] * 3)
+            self.assertEqual(controller.acl, self.ORIGINAL)
+            self.assertEqual(controller.result["kvmAccessRefreshes"], [
+                {"phase": phase, "aclChange": "named-user-removed",
+                 "effectiveAccessBefore": False, "effectiveAccessAfter": True}
+                for phase in ("qemu-kvm-probe", "initial-guest-install", "new-qemu-coldboot")])
+            self.assertTrue(controller.result["qemuKvmProbeVerified"])
+            self.assertEqual(controller.result["status"], "failed")
+
+    def test_acl_change_categories_distinguish_removal_from_mask_without_raw_values(self):
+        granted = self.granted_acl()
+        cases = ((granted, "unchanged"), (self.ORIGINAL, "named-user-removed"),
+                 (granted.replace(b"mask::rw-", b"mask::r--"), "mask-changed"),
+                 (granted.replace(f"user:{os.getuid()}:rw-".encode(), f"user:{os.getuid()}:r--".encode()), "named-user-changed"),
+                 (granted + b"# private-fixture\n", "other-change"))
+        for changed, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(host.kvm_acl_change(granted, changed), expected)
+
+    def test_refresh_failure_prevents_launch_without_retry(self):
+        for failure in ("settle", "grant", "effective-access"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                controller = self.controller(folder)
+                before = (self.DEVICE, self.ORIGINAL, False)
+                responses = ([subprocess.TimeoutExpired("udevadm", 6)] if failure == "settle"
+                             else [mock.Mock(), host.Failure()] if failure == "grant"
+                             else [mock.Mock(), mock.Mock()])
+                with mock.patch.object(controller, "run", side_effect=responses) as run, mock.patch.object(host, "kvm_access_snapshot", return_value=before), mock.patch.object(host.subprocess, "Popen") as launch, mock.patch("builtins.print"), self.assertRaises((host.Failure, subprocess.TimeoutExpired)):
+                    controller.probe_qemu_kvm()
+                launch.assert_not_called()
+                self.assertEqual(len(run.call_args_list), 1 if failure == "settle" else 2)
+                self.assertEqual(controller.stage, "kvm-access-settle" if failure == "settle" else "kvm-access-refresh")
+                self.assertEqual(controller.acl, self.ORIGINAL)
+                self.assertNotIn("qemuKvmProbeVerified", controller.result)
+                self.assertIsNone(controller.probe_proc)
+
+    def test_refresh_refuses_changed_device_before_any_grant(self):
+        for field in range(len(self.DEVICE)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as folder:
+                controller = self.controller(folder)
+                changed = list(self.DEVICE)
+                changed[field] = 0 if field == 3 else changed[field] + 1
+                with mock.patch.object(controller, "run") as run, mock.patch.object(host, "kvm_access_snapshot", return_value=(tuple(changed), self.ORIGINAL, False)), self.assertRaises(host.Failure):
+                    controller.refresh_kvm_access()
+                run.assert_called_once_with(["udevadm", "settle", "--timeout=5"], timeout=6)
+                self.assertEqual(controller.acl, self.ORIGINAL)
+
+    def test_device_replacement_during_grant_cannot_launch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            changed = list(self.DEVICE)
+            changed[1] += 1
+            snapshots = [(self.DEVICE, self.ORIGINAL, False), (tuple(changed), self.granted_acl(), True)]
+            with mock.patch.object(controller, "run"), mock.patch.object(host, "kvm_access_snapshot", side_effect=snapshots), mock.patch.object(host.subprocess, "Popen") as launch, mock.patch("builtins.print"), self.assertRaises(host.Failure):
+                controller.probe_qemu_kvm()
+            launch.assert_not_called()
+            self.assertEqual(controller.acl, self.ORIGINAL)
+
+    def test_refresh_refuses_missing_original_or_foreign_ownership_before_commands(self):
+        for failure in ("acl", "baseline", "marker"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                controller = self.controller(folder)
+                if failure == "acl":
+                    controller.acl = None
+                elif failure == "baseline":
+                    controller.kvm_access_before = None
+                else:
+                    (controller.work / "owner.json").write_text("{}")
+                with mock.patch.object(controller, "run") as run, self.assertRaises(host.Failure):
+                    controller.refresh_kvm_access()
+                run.assert_not_called()
+
+    def test_cleanup_settles_then_restores_the_original_acl(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            controller.kvm_access_before = (self.DEVICE, self.granted_acl(), True)
+            with mock.patch.object(host, "kvm_device_identity", return_value=controller.kvm_original_identity), mock.patch.object(host.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+                controller.cleanup()
+            self.assertEqual(run.call_args_list, [
+                mock.call(["udevadm", "settle", "--timeout=5"], check=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6),
+                mock.call(["sudo", "-n", "setfacl", "--restore=-"], input=self.ORIGINAL, check=True,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)])
+            self.assertFalse(controller.work.exists())
+
+    def test_cleanup_settle_failure_still_attempts_restore_and_fails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            with mock.patch.object(host, "kvm_device_identity", return_value=controller.kvm_original_identity), mock.patch.object(host.subprocess, "run", side_effect=[subprocess.TimeoutExpired("udevadm", 6), mock.Mock(returncode=0)]) as run, self.assertRaises(host.Failure):
+                controller.cleanup()
+            self.assertEqual(run.call_args_list[1].kwargs["input"], self.ORIGINAL)
+            self.assertEqual(controller.result["cleanupFailureCodes"], ["cleanup-kvm-settle"])
+            self.assertFalse(controller.work.exists())
+
+    def test_cleanup_replacement_after_refresh_refusal_never_writes_acl(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            controller.kvm_original_identity = self.DEVICE[:3] + self.DEVICE[4:]
+            changed = list(self.DEVICE)
+            changed[1] += 1
+            replacement = tuple(changed[:3] + changed[4:])
+            with mock.patch.object(controller, "run"), mock.patch.object(host, "kvm_access_snapshot", return_value=(tuple(changed), self.ORIGINAL, False)), self.assertRaises(host.Failure):
+                controller.refresh_kvm_access()
+            with mock.patch.object(host, "kvm_device_identity", return_value=replacement), mock.patch.object(host.subprocess, "run") as run, self.assertRaises(host.Failure):
+                controller.cleanup()
+            run.assert_called_once_with(["udevadm", "settle", "--timeout=5"], check=True,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
+            self.assertEqual(controller.result["cleanupFailureCodes"], ["cleanup-kvm-identity"])
+            self.assertFalse(controller.work.exists())
+
+    def test_cleanup_revalidates_after_settle_before_restore(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            events = []
+            def run(args, **_kwargs):
+                events.append("settle" if args[0] == "udevadm" else "restore")
+                return mock.Mock(returncode=0)
+            def identity():
+                self.assertEqual(events, ["settle"])
+                events.append("identity")
+                return controller.kvm_original_identity
+            with mock.patch.object(host, "kvm_device_identity", side_effect=identity), mock.patch.object(host.subprocess, "run", side_effect=run):
+                controller.cleanup()
+            self.assertEqual(events, ["settle", "identity", "restore"])
+
+    def test_cleanup_missing_device_or_original_identity_refuses_acl_write(self):
+        for missing in ("device", "identity"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as folder:
+                controller = self.controller(folder)
+                if missing == "identity":
+                    controller.kvm_original_identity = None
+                with mock.patch.object(host, "kvm_device_identity", side_effect=FileNotFoundError), mock.patch.object(host.subprocess, "run") as run, self.assertRaises(host.Failure):
+                    controller.cleanup()
+                self.assertEqual(len(run.call_args_list), 1)
+                self.assertEqual(run.call_args.args[0][0], "udevadm")
+                self.assertEqual(controller.result["cleanupFailureCodes"], ["cleanup-kvm-identity"])
+                self.assertFalse(controller.work.exists())
+
+    def test_original_device_identity_requires_character_device_without_symlink(self):
+        info = mock.Mock(st_dev=1, st_ino=2, st_rdev=3, st_uid=0, st_gid=108)
+        for mode in (0o20660, 0o20640, 0o100660, 0o120777):
+            info.st_mode = mode
+            with self.subTest(mode=mode), mock.patch.object(host.Path, "lstat", return_value=info):
+                if mode in (0o20660, 0o20640):
+                    self.assertEqual(host.kvm_device_identity(), (1, 2, 3, 0, 108))
+                else:
+                    with self.assertRaises(host.Failure):
+                        host.kvm_device_identity()
+
+    def test_original_acl_captured_once_in_preflight_never_overwritten_by_refresh(self):
+        source = (ROOT / "tests/rootless-coldboot.py").read_text()
+        self.assertEqual(source.count('self.acl = self.run(["getfacl", "-p", "/dev/kvm"]).stdout'), 1)
+        refresh = source[source.index("    def refresh_kvm_access"):source.index("    def stop_qemu_probe")]
+        preflight = source[source.index("    def preflight"):source.index("    def refresh_kvm_access")]
+        capture = "self.kvm_original_identity = kvm_device_identity()"
+        self.assertEqual(source.count(capture), 1)
+        self.assertLess(preflight.index(capture), preflight.index('"getfacl"'))
+        self.assertLess(preflight.index(capture), preflight.index('"setfacl"'))
+        self.assertNotIn("self.kvm_original_identity =", refresh)
+        self.assertNotIn("self.acl =", refresh)
+        self.assertNotIn("kvm_probe()", refresh)
+        self.assertLess(refresh.index('"udevadm"'), refresh.index('"setfacl"'))
+        self.assertLess(refresh.index('"setfacl"'), refresh.index("after = kvm_access_snapshot()"))
 
 
 class KvmAccessDifferentialTests(unittest.TestCase):

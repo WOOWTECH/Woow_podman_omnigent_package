@@ -106,12 +106,37 @@ def kvm_probe_status():
         return "api-rejected"
 
 
+def kvm_device_identity():
+    info = Path("/dev/kvm").lstat()
+    require(stat.S_ISCHR(info.st_mode))  # A symlink/replacement is not our device.
+    # ACL masks can change mode bits; device identity and ownership must match.
+    return info.st_dev, info.st_ino, info.st_rdev, info.st_uid, info.st_gid
+
+
 def kvm_access_snapshot():
     info = Path("/dev/kvm").stat()
     identity = (info.st_dev, info.st_ino, info.st_rdev, info.st_mode, info.st_uid, info.st_gid)
     acl = subprocess.run(["getfacl", "-cpn", "/dev/kvm"], capture_output=True, check=True, timeout=5).stdout
     effective_access = os.access("/dev/kvm", os.R_OK | os.W_OK, effective_ids=True)
     return identity, acl, effective_access
+
+
+def kvm_acl_change(before, after):
+    # Only fixed categories leave the private snapshots, never ACL entries/UIDs.
+    if before == after:
+        return "unchanged"
+    def entry(acl, prefix):
+        return next((line.split(b"#", 1)[0].strip() for line in acl.splitlines()
+                     if line.startswith(prefix)), None)
+    user = f"user:{os.getuid()}:".encode("ascii")
+    old_user, new_user = entry(before, user), entry(after, user)
+    if old_user is not None and new_user is None:
+        return "named-user-removed"
+    if old_user != new_user:
+        return "named-user-changed"
+    if entry(before, b"mask::") != entry(after, b"mask::"):
+        return "mask-changed"
+    return "other-change"
 
 
 def qemu_binary_sha256(binary):
@@ -223,6 +248,7 @@ class Controller:
         self.proc = None
         self.probe_proc = None
         self.kvm_access_before = None
+        self.kvm_original_identity = None
         self.acl = None
         self.completed = []
         self.deadline = time.monotonic() + 36 * 60
@@ -285,8 +311,9 @@ class Controller:
                            guestDiskGiB=DISK_GIB, initialHostFreeBytes=shutil.disk_usage(self.parent).free)
         self.done()
         self.stage_start("kvm-device-access")
-        require(stat.S_ISCHR(Path("/dev/kvm").stat().st_mode))
+        self.kvm_original_identity = kvm_device_identity()
         self.acl = self.run(["getfacl", "-p", "/dev/kvm"]).stdout
+        require(kvm_device_identity() == self.kvm_original_identity)
         self.run(["sudo", "-n", "setfacl", "-m", f"u:{os.getuid()}:rw", "/dev/kvm"])
         self.kvm_access_before = kvm_access_snapshot()
         self.done()
@@ -295,6 +322,32 @@ class Controller:
         self.result["kvmCreateVmVerified"] = True
         self.done()
         self.probe_qemu_kvm()
+
+    def refresh_kvm_access(self):
+        validate_owned(self.work, self.parent, self.nonce, self.identity)
+        require(self.acl is not None and self.kvm_access_before is not None)
+        phase = self.stage
+        self.stage = "kvm-access-settle"
+        # CREATE_VM and close emit device-change events. Drain pending events
+        # before the per-UID grant; never retry a failed QEMU or edit udev rules.
+        self.run(["udevadm", "settle", "--timeout=5"], timeout=6)
+        self.stage = "kvm-access-refresh"
+        before = kvm_access_snapshot()
+        # ACL masks may alter mode bits; inode/rdev/owner/group must not change.
+        def device_key(snapshot):
+            return snapshot[0][:3] + snapshot[0][4:]
+        require(stat.S_ISCHR(before[0][3]))
+        require(device_key(before) == device_key(self.kvm_access_before))
+        record = {"phase": phase, "aclChange": kvm_acl_change(self.kvm_access_before[1], before[1]),
+                  "effectiveAccessBefore": before[2], "effectiveAccessAfter": None}
+        self.result.setdefault("kvmAccessRefreshes", []).append(record)
+        self.run(["sudo", "-n", "setfacl", "-m", f"u:{os.getuid()}:rw", "/dev/kvm"], timeout=5)
+        after = kvm_access_snapshot()
+        record["effectiveAccessAfter"] = after[2]
+        require(stat.S_ISCHR(after[0][3]) and device_key(after) == device_key(before) and after[2])
+        # The differential baseline is the FINAL grant, not stale preflight access.
+        self.kvm_access_before = after
+        self.stage = phase
 
     def stop_qemu_probe(self):
         # This handle belongs only to the image-free probe, never the real guest.
@@ -320,6 +373,7 @@ class Controller:
                 "-display", "none", "-monitor", "none", "-serial", "none"]
         try:
             with (self.work / "qemu-probe.stderr").open("wb") as output:
+                self.refresh_kvm_access()
                 self.probe_proc = subprocess.Popen(args, stdin=subprocess.DEVNULL,
                                                    stdout=subprocess.DEVNULL, stderr=output,
                                                    env={**os.environ, "LC_ALL": "C"})
@@ -459,6 +513,7 @@ class Controller:
         # Reset per-boot stderr so a previous boot's warning cannot mask this exit.
         # The guest serial stream remains a separate private file.
         with (self.work / "qemu.stderr").open("wb") as output:
+            self.refresh_kvm_access()
             self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=output,
                                          env={**os.environ, "LC_ALL": "C"})
         deadline = min(time.monotonic() + 240, self.deadline)
@@ -539,6 +594,24 @@ class Controller:
             failed.append("cleanup-qemu")
         try:
             if self.acl is not None:
+                # Reaped VMs can have queued destroy events; settle before restore.
+                subprocess.run(["udevadm", "settle", "--timeout=5"], check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
+        except (OSError, subprocess.SubprocessError):
+            failed.append("cleanup-kvm-settle")
+        # After settle, revalidate the ORIGINAL device, even if refresh rejected
+        # a replacement. Never write saved permissions onto a different device.
+        can_restore_acl = False
+        try:
+            if self.acl is not None:
+                require(self.kvm_original_identity is not None)
+                require(kvm_device_identity() == self.kvm_original_identity)
+                can_restore_acl = True
+        except (Failure, OSError):
+            failed.append("cleanup-kvm-identity")
+        # A failed settle still attempts restoration if device identity matches.
+        try:
+            if can_restore_acl:
                 subprocess.run(["sudo", "-n", "setfacl", "--restore=-"], input=self.acl, check=True,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
         except (OSError, subprocess.SubprocessError):

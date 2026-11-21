@@ -35,7 +35,8 @@ amd64/arm64 × private/shared upgrade and rollback matrix.
    `setpriv` does not create a PAM/login session. No manual service start or
    package-owner login occurs after poweroff, including during verification.
 6. Final guest poweroff succeeds, the owned QEMU process exits, the private disk,
-   keys and logs are deleted, and the original KVM device ACL is restored.
+   keys and logs are deleted, pending device events settle, and the original KVM
+   device ACL is restored.
    Cleanup failure fails the job even if retention passed.
 
 This establishes **guest coldboot** for the tested Ubuntu/KVM environment. It does
@@ -71,6 +72,20 @@ physical-host coldboot remains a separate deployment acceptance criterion.
   with an ACL, then requires KVM API version 12 and a successful `KVM_CREATE_VM`
   ioctl. Lack of group membership alone must not cause a false failure. Missing
   KVM, a rejected ioctl or unavailable resources fails closed: no TCG fallback.
+- Immediately before **each** QEMU launch (probe, first guest, second guest), a
+  bounded `udevadm settle --timeout=5` drains pending device events; the command
+  itself has a six-second timeout. The controller then reapplies only the current
+  UID's read/write ACL and snapshots effective access after that final grant.
+  Device inode, device number, owner and group must still match. A failed settle,
+  grant, identity or access check prevents launch. The original ACL is saved
+  once, with the original device identity captured before the first grant, and
+  never overwritten by these refreshes. Cleanup settles pending events after
+  stopping the owned processes, then revalidates that original device identity
+  before restoring its ACL. A missing, replaced or symlinked device skips the ACL
+  write and fails cleanup with `cleanup-kvm-identity`; owned-file cleanup still
+  runs. A settle failure still attempts restoration when identity matches and
+  fails the job. No udev rules, persistent group membership or device-wide
+  permissions are changed. There is no retry of a failed QEMU process.
 - Immediately after that ioctl, before downloading the image, an owned QEMU
   process must remain alive for three seconds with the same binary/default
   machine, KVM accelerator, host CPU, two vCPUs and 6 GiB RAM as the real boot.
@@ -91,6 +106,30 @@ physical-host coldboot remains a separate deployment acceptance criterion.
   Missing diagnostics are `unavailable`/null; `not-observed`
   is not proof that confinement is absent. The job stays failed, without changing
   permissions, disabling confinement or launching QEMU with extra privileges.
+
+## ACL lifetime evidence
+
+A failed hosted-runner receipt showed successful initial Python `KVM_CREATE_VM`,
+then QEMU `open` / `EACCES`. Both subsequent Python probes also returned `EACCES`.
+The device identity/mode/ownership stayed unchanged, its ACL changed, and effective
+access went from true to false. This establishes ordinary access loss, not a
+QEMU-specific failure. The exact actor changing the ACL remains unproven.
+
+A source-supported explanation is that the harness's own create/close probe
+queues device-change events: [Linux KVM emits change events on VM creation and
+destruction](https://github.com/torvalds/linux/blob/v6.11/virt/kvm/kvm_main.c).
+On systems that tag KVM for `uaccess`, [systemd's uaccess handler resets named-user
+ACLs when there is no active seat](https://github.com/systemd/systemd/blob/v255/src/udev/udev-builtin-uaccess.c).
+This explains why a grant checked before the ioctl need not survive until the
+next launch; it is an inference from source and the receipt, not a captured
+runner event trace. The bounded settle/grant sequence addresses that lifetime.
+
+`kvmAccessRefreshes` records only the fixed phase, effective-access booleans and
+an ACL change category (`unchanged`, `named-user-removed`, `named-user-changed`,
+`mask-changed`, or `other-change`). These compare the previous grant with the
+post-settle state, before refreshing it. Raw ACLs never leave the private logs.
+A successful refresh or offline test is not a coldboot pass: the actual startup
+probe and full two-boot guest acceptance must still succeed.
 
 ## Resource and time bounds
 
@@ -132,8 +171,10 @@ python3.12 -m unittest discover -s tests -p test_rootless_coldboot.py -v
 ```
 
 They exercise checksum/source rejection, ownership guards, KVM ioctl handling,
-strict SSH identity, and the ordering that prevents any package-user probe when
-boot identity, user manager or health checks fail. They do not launch a VM.
+ACL loss after ioctl/close, bounded refresh before all three QEMU launches,
+original-ACL restoration including failure paths, strict SSH identity, and the
+ordering that prevents any package-user probe when boot identity, user manager or
+health checks fail. They do not launch a VM.
 A passing offline suite does not replace the real PR job's sanitized receipt.
 
 Primary references: [Ubuntu dated image and checksums](https://cloud-images.ubuntu.com/noble/20261017/),
