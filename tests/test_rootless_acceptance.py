@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+REAL_RUN = subprocess.run
 REPO = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("rootless", REPO / "tests/rootless-mcp.py")
 rootless = importlib.util.module_from_spec(spec)
@@ -57,6 +58,41 @@ class RootlessFixtureTests(unittest.TestCase):
     def output(self, args, **kwargs):
         if "sha256sum" in args: return self.cookie + "  cookie-path\n"
         return self.markers[args[-1]]
+
+    def test_cookie_hash_uses_generic_entrypoint_artifact_directory(self):
+        def generic_output(args, **kwargs):
+            if args[-1] != "/data/artifacts/accounts-cookie-secret":
+                raise subprocess.CalledProcessError(1, args)
+            return self.cookie + "  private-cookie-path\n"
+        with patch.object(rootless.subprocess, "check_output", side_effect=generic_output):
+            self.assertEqual(rootless.cookie_hash(), self.cookie)
+
+    def test_marker_write_creates_missing_parents_with_literal_values(self):
+        real_run = REAL_RUN
+        markers = (("fixture-server", str(Path(self.tmp.name) / "server/artifacts/marker")),
+                   ("fixture-runner", str(Path(self.tmp.name) / "runner/pi-agent/marker")))
+        # Execute the exact container shell command locally against fresh fixture paths.
+        def container_shell(args, **kwargs):
+            return real_run(args[3:], **kwargs)
+        value = "checkpoint ' # $literal"
+        with patch.object(rootless, "MARKERS", markers), \
+             patch.object(rootless.subprocess, "run", side_effect=container_shell):
+            rootless.marker_write(value)
+        for _, path in markers:
+            self.assertEqual(Path(path).read_text(), value)
+
+    def test_failure_code_names_cookie_step_without_private_details(self):
+        failure = Path(self.tmp.name) / "failure-code"
+        private = "http://127.0.0.1:18000/mcp/private_synthetic-secret"
+        with patch.object(rootless, "cookie_hash", side_effect=OSError(private)), \
+             patch.dict(os.environ, {"OMNIGENT_ROOTLESS_FAILURE_FILE": str(failure)}), \
+             patch("sys.argv", ["rootless-mcp", "prepare", str(self.path)]), \
+             contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(rootless.main(), 1)
+        self.assertTrue(failure.is_file(), "safe failure code was not recorded")
+        self.assertEqual(failure.read_text(), "cookie\n")
+        self.assertEqual(failure.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(private, error.getvalue())
 
     def test_restart_and_restore_contract_with_post_checkpoint_mutation(self):
         rootless.prepare(self.path)
@@ -165,6 +201,29 @@ id() { printf 'fixture-user\n'; }
     def test_http_fixture_refuses_external_targets(self):
         with self.assertRaisesRegex(ValueError, "loopback"):
             rootless.request("https://external.invalid/mcp/private_synthetic")
+
+    def test_failure_code_rejects_arbitrary_text_and_enters_sanitized_report(self):
+        source = (REPO / "tests/rootless-acceptance.sh").read_text()
+        function = "read_failure_code() {" + source.split("read_failure_code() {", 1)[1].split("\nfinish()", 1)[0]
+        reporter = source.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            code_path = Path(directory) / "failure-code"
+            report_path = Path(directory) / "result.json"
+            for value, expected in (("cookie\n", "cookie"), ("private_synthetic-secret\n", "unknown"),
+                                    ("cookie\nprivate_synthetic-secret\n", "unknown")):
+                with self.subTest(expected=expected):
+                    code_path.write_text(value)
+                    command = "set -euo pipefail\nOMNIGENT_ROOTLESS_FAILURE_FILE=$1\n" + function + "\nread_failure_code\n"
+                    result = subprocess.run(["bash", "-c", command, "fixture", str(code_path)],
+                                            capture_output=True, text=True, check=True)
+                    self.assertEqual(result.stdout, expected)
+                    subprocess.run(["python3", "-c", reporter, str(report_path), str(REPO), "1",
+                                    "prepare-profiles", "true", "0", result.stdout, "install", "browser-mcp"],
+                                   capture_output=True, text=True, check=True)
+                    report = json.loads(report_path.read_text())
+                    self.assertEqual(report["failureCode"], expected)
+                    self.assertEqual(report["completedStages"], ["install", "browser-mcp"])
+                    self.assertNotIn("private_synthetic-secret", report_path.read_text())
 
     def test_workflow_only_uploads_explicit_sanitized_result(self):
         workflow = (REPO / ".github/workflows/rootless-acceptance.yml").read_text()

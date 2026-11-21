@@ -18,8 +18,19 @@ BASE = "http://127.0.0.1:18000"
 PROFILE_API = BASE + "/v1/admin/mcp-server/profiles"
 SECRET_NAMES = ("omnigent-postgres-password", "omnigent-admin-password",
                 "omnigent-runner-password", "omnigent-database-url")
+FAILURE_STEPS = frozenset({"dispatch", "login", "create", "revoke", "secret-hash", "cookie",
+                           "marker", "probe", "profile-list", "state", "browser"})
+current_step = "dispatch"
 MARKERS = (("omnigent-server", "/data/artifacts/rootless-ci-marker"),
            ("omnigent-runner", "/data/pi-agent/rootless-ci-marker"))
+
+
+def run_step(code, action, *args, **kwargs):
+    global current_step
+    if code not in FAILURE_STEPS:
+        raise ValueError("unknown fixture step")
+    current_step = code
+    return action(*args, **kwargs)
 
 
 def require(condition, message):
@@ -91,55 +102,56 @@ def save(path, state):
 
 def marker_write(value):
     for container, path in MARKERS:
-        subprocess.run(["podman", "exec", container, "sh", "-c", 'printf %s "$1" > "$2"', "marker", value, path],
+        subprocess.run(["podman", "exec", container, "sh", "-c", 'mkdir -p -- "${2%/*}" && printf %s "$1" > "$2"', "marker", value, path],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def cookie_hash():
-    return subprocess.check_output(["podman", "exec", "omnigent-server", "sha256sum", "/data/accounts-cookie-secret"],
+    return subprocess.check_output(["podman", "exec", "omnigent-server", "sha256sum", "/data/artifacts/accounts-cookie-secret"],
                                    text=True, stderr=subprocess.DEVNULL).split()[0]
 
 
 def prepare(path):
-    token = login()
-    state = {"active": create(token, "rootless-retained"), "revoked": create(token, "rootless-revoked")}
-    revoke(token, state["revoked"])
-    state["secrets"] = secret_hashes()
-    state["cookie"] = cookie_hash()
-    marker_write("checkpoint")
-    save(path, state)
+    token = run_step("login", login)
+    state = {"active": run_step("create", create, token, "rootless-retained"),
+             "revoked": run_step("create", create, token, "rootless-revoked")}
+    run_step("revoke", revoke, token, state["revoked"])
+    state["secrets"] = run_step("secret-hash", secret_hashes)
+    state["cookie"] = run_step("cookie", cookie_hash)
+    run_step("marker", marker_write, "checkpoint")
+    run_step("state", save, path, state)
     check(path)
 
 
 def check(path, restored=False):
-    state = json.loads(path.read_text())
-    probe(state["active"], True)
-    probe(state["revoked"], False)
-    status, body = request(PROFILE_API, token=login())
+    state = run_step("state", lambda: json.loads(path.read_text()))
+    run_step("probe", probe, state["active"], True)
+    run_step("probe", probe, state["revoked"], False)
+    status, body = run_step("profile-list", request, PROFILE_API, token=run_step("login", login))
     require(status == 200, "profile list failed")
     rows = {p["id"]: p for p in body["profiles"]}
     require(rows[state["active"]["id"]]["active"] is True, "active profile state lost")
     require(rows[state["revoked"]["id"]]["active"] is False, "revoked profile state lost")
     if restored:
         require(state["afterCheckpoint"]["id"] not in rows, "database restore retained post-checkpoint data")
-        probe(state["afterCheckpoint"], False)
-    require(secret_hashes() == state["secrets"], "password secrets changed")
-    require(cookie_hash() == state["cookie"], "cookie secret changed")
+        run_step("probe", probe, state["afterCheckpoint"], False)
+    require(run_step("secret-hash", secret_hashes) == state["secrets"], "password secrets changed")
+    require(run_step("cookie", cookie_hash) == state["cookie"], "cookie secret changed")
     for container, marker in MARKERS:
-        value = subprocess.check_output(["podman", "exec", container, "cat", marker], stderr=subprocess.DEVNULL)
+        value = run_step("marker", subprocess.check_output,
+                         ["podman", "exec", container, "cat", marker], stderr=subprocess.DEVNULL)
         require(value == b"checkpoint", "server/private Pi artifact checkpoint differs")
 
 
 def mutate(path):
-    state = json.loads(path.read_text())
-    token = login()
-    revoke(token, state["active"])
-    state["afterCheckpoint"] = create(token, "rootless-after-checkpoint")
-    probe(state["active"], False)
-    probe(state["afterCheckpoint"], True)
-    marker_write("changed-after-checkpoint")
-    save(path, state)
-
+    state = run_step("state", lambda: json.loads(path.read_text()))
+    token = run_step("login", login)
+    run_step("revoke", revoke, token, state["active"])
+    state["afterCheckpoint"] = run_step("create", create, token, "rootless-after-checkpoint")
+    run_step("probe", probe, state["active"], False)
+    run_step("probe", probe, state["afterCheckpoint"], True)
+    run_step("marker", marker_write, "changed-after-checkpoint")
+    run_step("state", save, path, state)
 
 def browser():
     env = {**os.environ, "OMNIGENT_BASE_URL": BASE, "OMNIGENT_MCP_PUBLIC_BASE_URL": BASE,
@@ -155,12 +167,20 @@ def main():
     parser.add_argument("state", type=Path)
     args = parser.parse_args()
     try:
-        if args.phase == "browser": browser()
+        if args.phase == "browser": run_step("browser", browser)
         elif args.phase == "restored": check(args.state, restored=True)
-        else: {"prepare": prepare, "check": check, "mutate": mutate}[args.phase](args.state)
+        else: run_step("dispatch", {"prepare": prepare, "check": check, "mutate": mutate}[args.phase], args.state)
     except (ValueError, KeyError, TypeError, AttributeError, OSError, URLError, subprocess.SubprocessError):
         # Never echo an exception: network errors can include the private MCP URL.
-        print("FAIL rootless MCP phase " + args.phase + " (details withheld)", file=sys.stderr)
+        code = current_step if current_step in FAILURE_STEPS else "unknown"
+        if failure_path := os.environ.get("OMNIGENT_ROOTLESS_FAILURE_FILE"):
+            try:
+                with open(failure_path, "w", encoding="ascii") as output:
+                    os.fchmod(output.fileno(), 0o600)
+                    output.write(code + "\n")
+            except OSError:
+                pass
+        print("FAIL rootless MCP phase " + args.phase + " step " + code + " (details withheld)", file=sys.stderr)
         return 1
     print("PASS rootless MCP phase " + args.phase)
     return 0

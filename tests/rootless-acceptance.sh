@@ -41,8 +41,22 @@ phase=preflight
 completed=()
 rootless_verified=false
 report=$RUNNER_TEMP/omnigent-rootless-result.json
+export OMNIGENT_ROOTLESS_FAILURE_FILE=$work/failure-code
+read_failure_code() {
+  local code=unknown
+  if [[ -f $OMNIGENT_ROOTLESS_FAILURE_FILE ]]; then
+    code=$(<"$OMNIGENT_ROOTLESS_FAILURE_FILE")
+  fi
+  # Only fixed fixture codes can enter public output, never exception text.
+  case $code in
+    dispatch|login|create|revoke|secret-hash|cookie|marker|probe|profile-list|state|browser) ;;
+    *) code=unknown ;;
+  esac
+  printf '%s' "$code"
+}
 finish() {
-  local rc=$? cleanup_rc=0
+  local rc=$? cleanup_rc=0 failure_code
+  failure_code=$(read_failure_code)
   trap - EXIT
   set +e
   # Only the fresh, named resources this script owns. Never export logs/dumps/secrets.
@@ -61,19 +75,19 @@ finish() {
   rm -rf -- "$HOME/.config/omnigent" "$HOME/.local/state/woow-quadlet/omnigent" "$HOME/backups/omnigent"
   rm -rf -- "$work" "$REPO/tests/e2e/test-results" "$REPO/tests/e2e/playwright-report"
   ((cleanup_rc == 0)) || rc=1
-  python3 - "$report" "$REPO" "$rc" "$phase" "$rootless_verified" "$cleanup_rc" "${completed[@]}" <<'PY'
+  python3 - "$report" "$REPO" "$rc" "$phase" "$rootless_verified" "$cleanup_rc" "$failure_code" "${completed[@]}" <<'PY'
 import json, pathlib, subprocess, sys
-path, repo, rc, phase, rootless, cleanup, *stages = sys.argv[1:]
+path, repo, rc, phase, rootless, cleanup, failure_code, *stages = sys.argv[1:]
 receipt = json.loads((pathlib.Path(repo) / 'config/server-image.json').read_text())
 result = {'status': 'passed' if rc == '0' and phase == 'complete' else 'failed',
-          'completedStages': stages, 'lastStage': phase, 'rootlessVerified': rootless == 'true',
+          'completedStages': stages, 'lastStage': phase, 'failureCode': failure_code if rc != '0' else None, 'rootlessVerified': rootless == 'true',
           'cleanupComplete': cleanup == '0', 'architecture': 'linux/amd64', 'piState': 'private',
           'packageCommit': subprocess.check_output(['git','rev-parse','HEAD'], cwd=repo, text=True).strip(),
           'sourceCommit': receipt['sourceCommit'], 'imageDigest': receipt['imageDigest'],
           'exclusions': ['cold boot', 'arm64 rootless', 'shared Pi', 'paid model execution', 'A-to-B schema migration']}
 pathlib.Path(path).write_text(json.dumps(result, indent=2)+'\n')
 PY
-  if ((rc == 0)); then printf 'PASS disposable rootless acceptance\n'; else printf 'FAIL disposable rootless stage %s (exit %s)\n' "$phase" "$rc"; fi
+  if ((rc == 0)); then printf 'PASS disposable rootless acceptance\n'; else printf 'FAIL disposable rootless stage %s step %s (exit %s)\n' "$phase" "$failure_code" "$rc"; fi
   exit "$rc"
 }
 trap finish EXIT
