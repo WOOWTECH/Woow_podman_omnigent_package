@@ -38,10 +38,15 @@ GUEST_CODES = frozenset({"guest-guard", "guest-guard-runtime", "guest-guard-argu
                          "guest-guard-marker", "guest-guard-marker-nonce", "guest-guard-dmi",
                          "guest-guard-instance", "guest-guard-release", "guest-guard-owner",
                          "guest-guard-home", "guest-guard-owner-ssh", "guest-guard-controller",
+                         "guest-guard-owner-locked", "guest-guard-sshd",
                          "freshness", "guest-packages", "source", "linger",
                          "install", "initial-health", "prepare-profiles", "initial-smoke",
                          "identity", "poweroff", "boot-identity", "manager-before-owner",
                          "health-before-owner", "timer", "retention", "runtime-receipt"})
+
+GUEST_SSH_EMPTY_STATES = frozenset({"absent", "empty-directory", "empty-authorized-keys"})
+GUEST_SSH_STATES = GUEST_SSH_EMPTY_STATES | {"unavailable", "unsafe-directory", "unexpected-entry",
+                                          "unsafe-authorized-keys", "nonempty-authorized-keys"}
 
 
 class Failure(Exception):
@@ -537,11 +542,16 @@ class Controller:
         result = self.ssh(["sudo", "-n", "python3", GUEST_SCRIPT, phase, self.nonce,
                            self.head, self.source_hash], timeout=timeout, check=False)
         value = json.loads(result.stdout)
+        ssh_state = value.get("ownerSshState")
+        self.result["ownerSshState"] = ssh_state if isinstance(ssh_state, str) and ssh_state in GUEST_SSH_STATES else "unavailable"
+        self.result["ownerSshIsolationVerified"] = (value.get("ownerSshIsolationVerified") is True
+                                                   and self.result["ownerSshState"] in GUEST_SSH_EMPTY_STATES)
         if result.returncode != 0 or value.get("ok") is not True:
             code = value.get("failureCode")
             if code in GUEST_CODES:
                 self.stage = code
             raise Failure()
+        require(self.result["ownerSshIsolationVerified"])
         return value
 
     def acceptance(self):

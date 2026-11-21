@@ -863,15 +863,28 @@ class GuestGateTests(unittest.TestCase):
             mock.patch.object(guest.Path, "exists", return_value=change.get("ssh_exists", False)),
             mock.patch.object(guest.sys, "argv", ["guest", "prepare", change.get("nonce", NONCE), HEAD, SOURCE_HASH]),
         ]
+        def root_query(args, **_kwargs):
+            if args == ["passwd", "--status", guest.OWNER]:
+                return guest.OWNER + " " + change.get("password_state", "L") + " synthetic-status"
+            if args == ["/usr/sbin/sshd", "-T"]:
+                return change.get("sshd", "allowusers coldboot-controller\npasswordauthentication no\nkbdinteractiveauthentication no\npermitrootlogin no")
+            raise AssertionError("unexpected root command")
+        patches.extend([
+            mock.patch.object(guest, "inspect_owner_ssh", create=True, return_value=change.get("ssh_state", "nonempty-authorized-keys" if change.get("ssh_exists") else "absent")),
+            mock.patch.object(guest, "run", side_effect=root_query),
+        ])
         stack = ExitStack()
         for patch in patches:
             stack.enter_context(patch)
         return stack
 
     def test_guest_guard_valid_fixture_keeps_all_checks(self):
-        with self.guard_fixture(), mock.patch.object(guest, "run") as run:
+        with self.guard_fixture():
             guest.guard(NONCE, HEAD, SOURCE_HASH)
-        run.assert_not_called()
+
+    def test_guest_guard_accepts_cloud_init_empty_files_without_deleting_or_login(self):
+        with self.guard_fixture({"ssh_exists": True, "ssh_state": "empty-authorized-keys"}):
+            guest.guard(NONCE, HEAD, SOURCE_HASH)
 
     def test_guest_guard_reports_exact_fixed_gate_without_running_prepare(self):
         cases = (
@@ -886,15 +899,20 @@ class GuestGateTests(unittest.TestCase):
             ({"home_dir": False}, "guest-guard-home"),
             ({"ssh_exists": True}, "guest-guard-owner-ssh"),
             ({"controller_uid": guest.UID}, "guest-guard-controller"),
+            ({"password_state": "P"}, "guest-guard-owner-locked"),
+            ({"sshd": "allowusers coldboot-controller coldboot-owner"}, "guest-guard-sshd"),
         )
         for change, code in cases:
-            with self.subTest(code=code), self.guard_fixture(change), mock.patch.object(guest, "prepare") as prepare, mock.patch.object(guest, "run") as run, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            with self.subTest(code=code), self.guard_fixture(change), mock.patch.object(guest, "prepare") as prepare, mock.patch("sys.stdout", new_callable=io.StringIO) as output:
                 self.assertEqual(guest.main(), 1)
-                self.assertEqual(json.loads(output.getvalue()), {"ok": False, "failureCode": code})
+                state = ("nonempty-authorized-keys" if code == "guest-guard-owner-ssh" else
+                         "absent" if code in {"guest-guard-controller", "guest-guard-owner-locked", "guest-guard-sshd"}
+                         else "unavailable")
+                self.assertEqual(json.loads(output.getvalue()), {"ok": False, "failureCode": code,
+                                                                 "ownerSshState": state, "ownerSshIsolationVerified": False})
                 self.assertNotIn("private-fixture", output.getvalue())
                 self.assertIn(code, host.GUEST_CODES)
             prepare.assert_not_called()
-            run.assert_not_called()
 
     def test_controller_preserves_only_allowlisted_guest_guard_codes(self):
         controller = host.Controller()
@@ -905,6 +923,25 @@ class GuestGateTests(unittest.TestCase):
             with mock.patch.object(controller, "ssh", return_value=reply), self.assertRaises(host.Failure):
                 controller.guest("prepare")
             self.assertEqual(controller.stage, code if code in host.GUEST_CODES else "initial-guest-install")
+
+    def test_guest_and_controller_record_only_fixed_ssh_state_and_verified_isolation(self):
+        with self.guard_fixture({"ssh_exists": True, "ssh_state": "empty-authorized-keys"}), mock.patch.object(guest, "prepare", return_value={"ok": True, "packageCommit": HEAD}), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            self.assertEqual(guest.main(), 0)
+            value = json.loads(output.getvalue())
+        self.assertEqual(value["ownerSshState"], "empty-authorized-keys")
+        self.assertTrue(value["ownerSshIsolationVerified"])
+        controller = host.Controller()
+        controller.nonce, controller.head, controller.source_hash = NONCE, HEAD, SOURCE_HASH
+        with mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=0, stdout=json.dumps(value))):
+            controller.guest("prepare")
+        self.assertEqual(controller.result["ownerSshState"], "empty-authorized-keys")
+        self.assertTrue(controller.result["ownerSshIsolationVerified"])
+        for state, verified in (("nonempty-authorized-keys", True), ("private-fixture", True), ("absent", False)):
+            reply = {**value, "ownerSshState": state, "ownerSshIsolationVerified": verified}
+            with mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=0, stdout=json.dumps(reply))), self.assertRaises(host.Failure):
+                controller.guest("prepare")
+            self.assertNotIn("private-fixture", json.dumps(controller.result))
+            self.assertFalse(controller.result["ownerSshIsolationVerified"])
 
     def test_nonce_dmi_and_cloud_instance_must_all_match(self):
         guest.guest_identity_matches(NONCE, {"nonce": NONCE}, NONCE.upper(), NONCE + "\n")
@@ -928,6 +965,87 @@ class GuestGateTests(unittest.TestCase):
         self.assertIn(["python3", str(guest.SOURCE / "tests/rootless-mcp.py"), "check", str(guest.STATE)], calls)
         self.assertNotIn("prepare", [part for call in calls for part in call])
         self.assertFalse({"start", "restart", "enable-linger"} & {part for call in calls for part in call})
+
+
+class OwnerSshStateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.ssh = self.home / ".ssh"
+        self.keys = self.ssh / "authorized_keys"
+        for patch in (mock.patch.object(guest, "HOME", self.home), mock.patch.object(guest, "UID", os.getuid())):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def make_keys(self, contents=b""):
+        self.ssh.mkdir(mode=0o700)
+        self.ssh.chmod(0o700)
+        self.keys.write_bytes(contents)
+        self.keys.chmod(0o600)
+
+    def test_absent_empty_directory_and_zero_byte_authorized_keys_are_observed_read_only(self):
+        self.assertEqual(guest.inspect_owner_ssh(), "absent")
+        self.ssh.mkdir(mode=0o700)
+        self.ssh.chmod(0o700)
+        self.assertEqual(guest.inspect_owner_ssh(), "empty-directory")
+        self.keys.touch(mode=0o600)
+        self.assertEqual(guest.inspect_owner_ssh(), "empty-authorized-keys")
+        self.assertEqual(self.keys.read_bytes(), b"")
+        self.assertEqual(list(self.ssh.iterdir()), [self.keys])
+
+    def test_every_nonzero_key_byte_is_rejected_without_deletion(self):
+        self.make_keys()
+        for content in (b"synthetic-key-data", b" ", b"\n", b"# comment"):
+            self.keys.write_bytes(content)
+            self.assertEqual(guest.inspect_owner_ssh(), "nonempty-authorized-keys")
+            self.assertEqual(self.keys.read_bytes(), content)
+
+    def test_unexpected_entries_and_unsafe_permissions_are_rejected_unchanged(self):
+        self.make_keys()
+        other = self.ssh / "unexpected"
+        other.touch()
+        self.assertEqual(guest.inspect_owner_ssh(), "unexpected-entry")
+        self.assertTrue(other.exists())
+        other.unlink()
+        self.keys.chmod(0o644)
+        self.assertEqual(guest.inspect_owner_ssh(), "unsafe-authorized-keys")
+        self.keys.chmod(0o600)
+        self.ssh.chmod(0o755)
+        self.assertEqual(guest.inspect_owner_ssh(), "unsafe-directory")
+        self.assertEqual(self.ssh.stat().st_mode & 0o777, 0o755)
+
+    def test_symlinks_nonregular_files_and_hardlinks_are_rejected_unchanged(self):
+        self.ssh.symlink_to(self.home / "missing", target_is_directory=True)
+        self.assertEqual(guest.inspect_owner_ssh(), "unsafe-directory")
+        self.assertTrue(self.ssh.is_symlink())
+        self.ssh.unlink()
+        self.make_keys()
+        self.keys.unlink()
+        self.keys.symlink_to(self.home / "missing")
+        self.assertEqual(guest.inspect_owner_ssh(), "unsafe-authorized-keys")
+        self.assertTrue(self.keys.is_symlink())
+        self.keys.unlink()
+        self.keys.mkdir(mode=0o600)
+        self.assertEqual(guest.inspect_owner_ssh(), "unsafe-authorized-keys")
+        self.keys.rmdir()
+        other = self.home / "empty"
+        other.touch(mode=0o600)
+        self.keys.hardlink_to(other)
+        self.assertEqual(guest.inspect_owner_ssh(), "unsafe-authorized-keys")
+        self.assertEqual(other.stat().st_nlink, 2)
+
+    def test_wrong_directory_or_file_owner_is_rejected(self):
+        self.make_keys()
+        original = Path.lstat
+        for target, state in ((self.ssh, "unsafe-directory"), (self.keys, "unsafe-authorized-keys")):
+            def lstat(path, expected_path=target):
+                info = original(path)
+                if path == expected_path:
+                    return mock.Mock(st_uid=os.getuid() + 1, st_mode=info.st_mode, st_nlink=info.st_nlink, st_size=info.st_size)
+                return info
+            with self.subTest(target=target.name), mock.patch.object(Path, "lstat", autospec=True, side_effect=lstat):
+                self.assertEqual(guest.inspect_owner_ssh(), state)
 
 
 class SourceTests(unittest.TestCase):

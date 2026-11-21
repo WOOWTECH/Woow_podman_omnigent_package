@@ -30,6 +30,7 @@ OWNER = "coldboot-owner"
 UNITS = ("omnigent-postgres.service", "omnigent-server.service", "omnigent-runner.service",
          "omnigent-server-health.timer")
 phase = "guest-guard"
+owner_ssh_observation = "unavailable"
 
 
 class Failure(Exception):
@@ -75,7 +76,29 @@ def guest_identity_matches(nonce, marker, dmi_uuid, instance_id):
     require(instance_id.strip() == nonce)
 
 
+def inspect_owner_ssh():
+    path = HOME / ".ssh"
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return "absent"
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != UID or stat.S_IMODE(info.st_mode) != 0o700:
+        return "unsafe-directory"
+    entries = {entry.name for entry in path.iterdir()}
+    if not entries:
+        return "empty-directory"
+    if entries != {"authorized_keys"}:
+        return "unexpected-entry"
+    info = (path / "authorized_keys").lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != UID
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        return "unsafe-authorized-keys"
+    return "empty-authorized-keys" if info.st_size == 0 else "nonempty-authorized-keys"
+
+
 def guard(nonce, head, source_hash):
+    global owner_ssh_observation
+    owner_ssh_observation = "unavailable"
     stage("guest-guard-runtime")
     require(os.geteuid() == 0 and platform.machine() == "x86_64")
     stage("guest-guard-arguments")
@@ -98,9 +121,17 @@ def guard(nonce, head, source_hash):
     stage("guest-guard-home")
     require(HOME.is_dir() and not HOME.is_symlink() and HOME.stat().st_uid == UID)
     stage("guest-guard-owner-ssh")
-    require(not (HOME / ".ssh").exists())
+    owner_ssh_observation = inspect_owner_ssh()
+    require(owner_ssh_observation in {"absent", "empty-directory", "empty-authorized-keys"})
     stage("guest-guard-controller")
     require(pwd.getpwnam("coldboot-controller").pw_uid != UID)
+    stage("guest-guard-owner-locked")
+    require(run(["passwd", "--status", OWNER]).split()[:2] == [OWNER, "L"])
+    stage("guest-guard-sshd")
+    sshd = run(["/usr/sbin/sshd", "-T"]).splitlines()
+    require([line for line in sshd if line.startswith("allowusers ")] == ["allowusers coldboot-controller"])
+    require(all(line in sshd for line in ("passwordauthentication no", "kbdinteractiveauthentication no",
+                                         "permitrootlogin no")))
 
 
 def boot_identity():
@@ -289,6 +320,9 @@ def poweroff(head, source_hash):
 
 
 def main():
+    global owner_ssh_observation
+    owner_ssh_observation = "unavailable"
+    guard_passed = False
     os.umask(0o077)
     try:
         stage("guest-guard-arguments")
@@ -296,10 +330,13 @@ def main():
         action, nonce, head, source_hash = sys.argv[1:]
         require(action in ("prepare", "verify", "poweroff"))
         guard(nonce, head, source_hash)
+        guard_passed = True
         value = {"prepare": prepare, "verify": verify, "poweroff": poweroff}[action](head, source_hash)
     except Exception:  # noqa: BLE001 -- public output must never contain credential-bearing errors
-        print(json.dumps({"ok": False, "failureCode": phase}))
+        print(json.dumps({"ok": False, "failureCode": phase, "ownerSshState": owner_ssh_observation,
+                          "ownerSshIsolationVerified": guard_passed}))
         return 1
+    value.update(ownerSshState=owner_ssh_observation, ownerSshIsolationVerified=guard_passed)
     print(json.dumps(value))
     return 0
 

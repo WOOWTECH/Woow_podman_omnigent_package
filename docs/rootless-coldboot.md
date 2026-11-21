@@ -57,6 +57,18 @@ physical-host coldboot remains a separate deployment acceptance criterion.
   storage, linger state or runtime directory. The package account has a locked
   password, a `nologin` shell and no SSH key. Only the separate controller account
   is allowed SSH; it can use root inside this disposable guest.
+  The owner SSH guard permits only absence, an owner-owned mode-0700 directory
+  with no entries, or that directory containing solely an owner-owned mode-0600,
+  regular, single-link, zero-byte `authorized_keys`. It rejects every nonzero byte,
+  unexpected entry, symlink, unsafe mode or wrong owner and never deletes content.
+  Root also verifies the account password is locked and global `sshd -T` output
+  permits only `coldboot-controller`, with password, keyboard-interactive and root
+  login disabled. This global check does not evaluate connection-specific `Match`
+  blocks. These queries do not log in or start services as the owner.
+  Empty files can be created by cloud-init's
+  [fingerprint module](https://github.com/canonical/cloud-init/blob/24.1/cloudinit/config/cc_ssh_authkey_fingerprints.py)
+  through its [SSH path helper](https://github.com/canonical/cloud-init/blob/24.1/cloudinit/ssh_util.py),
+  even when the user has no authorized keys.
 - Fresh SSH client and host keys are generated per run. Strict checking against
   the injected host key is mandatory on both boots. No `ssh-keyscan`/trust on
   first use. QEMU exposes only an SSH forward bound to host `127.0.0.1`; application
@@ -166,9 +178,15 @@ The generated boot identities belong only to this disposable guest.
 
 Guest preflight failures identify the failing guard through fixed
 `guest-guard-*` codes: runtime, arguments, marker file, marker nonce, DMI UUID,
-cloud instance ID, release, owner account, owner home, owner SSH state or controller
-account. The checks remain mandatory before preparation or any package-owner
-command. Values read by those guards and raw exception text are never reported.
+cloud instance ID, release, owner account, owner home, owner SSH state, controller
+account, locked password or global SSH configuration. The checks remain
+mandatory before preparation or any package-owner command. Values read by those guards and raw exception text are never reported.
+The receipt includes only a fixed `ownerSshState` category (such as `absent`,
+`empty-directory`, `empty-authorized-keys`, or a rejection category) and
+`ownerSshIsolationVerified`. A successful guest response requires an allowed empty
+state and verified isolation. No key bytes, unexpected filenames or raw SSH
+configuration enter the receipt. An earlier receipt identified only path
+presence; real acceptance must establish the actual safe state.
 
 Run offline contracts with Python 3.12 (the Ubuntu 24.04 guest runtime):
 
