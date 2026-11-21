@@ -233,8 +233,7 @@ def guard():
             .stdout.strip() == "true")
 
 
-def state_path(value):
-    step("state")
+def private_path(value):
     root = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     path = Path(value).absolute()
     require(path.parent.resolve(strict=True) == path.parent)
@@ -243,6 +242,28 @@ def state_path(value):
     require(parent.st_uid == os.getuid() and stat.S_IMODE(parent.st_mode) == 0o700)
     require(not path.is_symlink())
     return path
+
+
+def state_path(value):
+    step("state")
+    return private_path(value)
+
+
+def report_failure(code):
+    # The harness deletes private logs during cleanup. Preserve only an allowlisted
+    # substep in its private failure file, never an exception or subprocess output.
+    if code not in {"legacy-" + name for name in CODES}:
+        return
+    value = os.environ.get("OMNIGENT_ROOTLESS_FAILURE_FILE")
+    if not value:
+        return
+    try:
+        path = private_path(value)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as stream:
+            stream.write(code + "\n")
+    except (OSError, KeyError, RuntimeError, FixtureError):
+        pass  # Reporting failure must not hide the original fixture failure.
 
 
 def save_new(path, state):
@@ -462,7 +483,9 @@ def main(argv=None):
         args = parser.parse_args(argv)
         execute(args.operation, args.state, args.expected_head, args.mcp)
     except Exception:
-        print("FAIL legacy-" + current_step)
+        code = "legacy-" + current_step if current_step in CODES else "legacy-unknown"
+        report_failure(code)
+        print("FAIL " + code)
         return 1
     print("PASS legacy-" + args.operation)
     return 0

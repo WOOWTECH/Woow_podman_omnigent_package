@@ -213,6 +213,56 @@ class StateAndSafetyTests(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 120)
         self.assertNotIn("shell", kwargs)
 
+    def test_main_failure_code_reaches_real_harness_reader_without_exception_text(self):
+        harness = Path(__file__).with_name("rootless-acceptance.sh").read_text()
+        reader = "read_failure_code() {" + harness.split("read_failure_code() {", 1)[1].split("\n}", 1)[0] + "\n}\n"
+        failure = self.private / "failure-code"
+        env = {**os.environ, "OMNIGENT_ROOTLESS_FAILURE_FILE": str(failure)}
+        for code in sorted(legacy.CODES):
+            def fail(*args, failure_step=code):
+                legacy.step(failure_step)
+                raise RuntimeError("synthetic-private-exception-must-not-leak")
+            with self.subTest(code=code), patch.dict(os.environ, env), patch.object(legacy, "execute", side_effect=fail), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(legacy.main(["seed", str(self.path), "--expected-head", legacy.OLD_HEAD, "--mcp", "absent"]), 1)
+            result = REAL_RUN(["bash", "-c", "set -eu\n" + reader + "read_failure_code"],
+                              env=env, text=True, capture_output=True, check=True, timeout=5)
+            self.assertEqual(result.stdout, "legacy-" + code)
+            self.assertEqual(output.getvalue(), "FAIL legacy-" + code + "\n")
+            self.assertEqual(failure.stat().st_mode & 0o777, 0o600)
+            failure.unlink()
+        for code in ("legacy-not-allowed", "legacy-stores\nprivate-detail", "private-detail"):
+            failure.write_text(code)
+            result = REAL_RUN(["bash", "-c", "set -eu\n" + reader + "read_failure_code"],
+                              env=env, text=True, capture_output=True, check=True, timeout=5)
+            self.assertEqual(result.stdout, "unknown")
+
+    def test_failure_report_refuses_existing_symlink_and_public_paths(self):
+        sentinel = self.private / "sentinel"
+        sentinel.write_text("keep")
+        link = self.private / "linked"
+        link.symlink_to(sentinel)
+        public = self.root / "public"
+        public.mkdir(mode=0o755)
+        public.chmod(0o755)
+        for target in (sentinel, link, public / "failure-code", self.root / "failure-code"):
+            with self.subTest(target=target), patch.dict(os.environ, {"OMNIGENT_ROOTLESS_FAILURE_FILE": str(target)}):
+                legacy.report_failure("legacy-stores")
+            self.assertEqual(sentinel.read_text(), "keep")
+        self.assertFalse((public / "failure-code").exists())
+        self.assertFalse((self.root / "failure-code").exists())
+        failure = self.private / "failure-code"
+        with patch.dict(os.environ, {"OMNIGENT_ROOTLESS_FAILURE_FILE": str(failure)}):
+            legacy.report_failure("private-detail")
+        self.assertFalse(failure.exists())
+
+    def test_success_does_not_create_failure_receipt(self):
+        failure = self.private / "failure-code"
+        with patch.dict(os.environ, {"OMNIGENT_ROOTLESS_FAILURE_FILE": str(failure)}), \
+             patch.object(legacy, "execute"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(legacy.main(["seed", str(self.path), "--expected-head", legacy.OLD_HEAD, "--mcp", "absent"]), 0)
+        self.assertFalse(failure.exists())
+
     def test_snapshot_negative_controls(self):
         baseline = self.state["snapshot"]
         changes = [lambda s: s["accounts"]["viewer"].update(is_admin=True),

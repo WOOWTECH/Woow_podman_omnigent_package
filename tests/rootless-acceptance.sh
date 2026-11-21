@@ -70,6 +70,7 @@ read_failure_code() {
   # Only fixed fixture codes can enter public output, never exception text.
   case $code in
     dispatch|login|create|revoke|secret-hash|cookie|marker|probe|profile-list|state|browser|inventory|storage|peer) ;;
+    legacy-arguments|legacy-guard|legacy-state|legacy-schema|legacy-stores|legacy-accounts|legacy-acl|legacy-writers|legacy-mutate) ;;
     *) code=unknown ;;
   esac
   printf '%s' "$code"
