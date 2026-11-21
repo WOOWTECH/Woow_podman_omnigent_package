@@ -59,7 +59,8 @@ physical-host coldboot remains a separate deployment acceptance criterion.
 - Fresh SSH client and host keys are generated per run. Strict checking against
   the injected host key is mandatory on both boots. No `ssh-keyscan`/trust on
   first use. QEMU exposes only an SSH forward bound to host `127.0.0.1`; application
-  requests execute inside the guest against its own loopback.
+  requests execute inside the guest against its own loopback. The virtio NIC uses
+  `romfile=` because this guest boots from disk and does not use PXE.
 - The dated Ubuntu image and real SHA-256 are in
   [`tests/fixtures/coldboot-image.json`](../tests/fixtures/coldboot-image.json).
   Both the official dated checksum entry and downloaded bytes must match that
@@ -93,8 +94,11 @@ is evidence of an unmet prerequisite, never a coldboot pass.
 The only uploaded file is `omnigent-coldboot-result.json`. It includes actual and
 reviewed package SHAs, archive hash, pinned server source/digest, Ubuntu image pin,
 completed stages, boot IDs plus hashed machine ID, explicit proof booleans,
-static failure codes and cleanup outcome. Tokens, passwords, fixture JSON, keys,
-serial output, command output and disk images are never uploaded or printed.
+static failure codes and cleanup outcome. An early QEMU exit records its numeric
+exit status and an allowlisted fixed diagnostic summary from QEMU stderr. Unknown
+stderr stays withheld; the guest serial/cloud-init stream is never a diagnostic
+source. Tokens, passwords, fixture JSON, keys, serial output, command output and
+disk images are never uploaded or printed.
 The generated boot identities belong only to this disposable guest.
 
 Run offline contracts with Python 3.12 (the Ubuntu 24.04 guest runtime):

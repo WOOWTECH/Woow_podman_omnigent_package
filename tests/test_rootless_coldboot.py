@@ -203,6 +203,71 @@ class KvmAndTransportTests(unittest.TestCase):
         self.assertIn("AllowUsers coldboot-controller", config["write_files"][2]["content"])
 
 
+class BootDiagnosticsTests(unittest.TestCase):
+    def controller(self, folder):
+        controller = host.Controller()
+        controller.parent = Path(folder)
+        controller.work = controller.parent / "omnigent-coldboot-test"
+        controller.work.mkdir(mode=0o700)
+        controller.work.chmod(0o700)
+        controller.nonce, controller.port = NONCE, 23456
+        controller.identity = (controller.work.stat().st_dev, controller.work.stat().st_ino)
+        (controller.work / "owner.json").write_text(json.dumps({"nonce": NONCE, "uid": os.getuid()}))
+        controller.disk, controller.base = controller.work / "guest.qcow2", controller.work / "base.qcow2"
+        controller.disk.touch()
+        controller.base.touch()
+        controller.disk_identity = (controller.disk.stat().st_dev, controller.disk.stat().st_ino)
+        return controller
+
+    def test_qemu_early_exit_reports_only_allowlisted_stderr_and_exit_code(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            controller.stage = "initial-guest-install"
+            (controller.work / "serial.log").write_text("private-cloud-init-fixture")
+            def exited(_args, **kwargs):
+                kwargs["stderr"].write(b"qemu-system-x86_64: failed to find romfile 'private-fixture.rom'\n")
+                kwargs["stderr"].flush()
+                return mock.Mock(poll=mock.Mock(return_value=1))
+            with mock.patch.object(host.subprocess, "Popen", side_effect=exited) as launch, mock.patch.object(controller, "ssh") as ssh, self.assertRaises(host.Failure):
+                controller.boot()
+            args = launch.call_args.args[0]
+            self.assertIn("virtio-net-pci,netdev=net0,romfile=", args)
+            self.assertEqual(controller.stage, "qemu-missing-rom")
+            self.assertEqual(controller.result["qemuExitCode"], 1)
+            self.assertEqual(controller.result["qemuFailureStage"], "initial-guest-install")
+            self.assertIn("ROM", controller.result["qemuStderrSummary"])
+            self.assertNotIn("private-fixture", json.dumps(controller.result))
+            self.assertNotIn("private-cloud-init-fixture", json.dumps(controller.result))
+            ssh.assert_not_called()
+
+    def test_unknown_qemu_stderr_cannot_become_public_output(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            def exited(_args, **kwargs):
+                kwargs["stderr"].write(b"unrecognized private-fixture-token diagnostic\n")
+                kwargs["stderr"].flush()
+                return mock.Mock(poll=mock.Mock(return_value=-9))
+            with mock.patch.object(host.subprocess, "Popen", side_effect=exited), self.assertRaises(host.Failure):
+                controller.boot()
+            self.assertEqual(controller.stage, "qemu-early-exit")
+            self.assertEqual(controller.result["qemuExitCode"], -9)
+            self.assertNotIn("private-fixture", json.dumps(controller.result))
+
+    def test_boot_keeps_kvm_owned_disk_loopback_and_controller_ssh(self):
+        with tempfile.TemporaryDirectory() as folder:
+            controller = self.controller(folder)
+            with mock.patch.object(host.subprocess, "Popen", return_value=mock.Mock(poll=mock.Mock(return_value=None))) as launch, mock.patch.object(controller, "ssh", return_value=mock.Mock(returncode=0)) as ssh:
+                controller.boot()
+            args = launch.call_args.args[0]
+            self.assertIn("virtio-net-pci,netdev=net0,romfile=", args)
+            self.assertEqual(args[args.index("-accel") + 1], "kvm")
+            self.assertIn(f"file={controller.disk},format=qcow2,if=virtio", args)
+            self.assertIn("user,id=net0,hostfwd=tcp:127.0.0.1:23456-:22", args)
+            self.assertEqual(launch.call_args.kwargs["stdout"], subprocess.DEVNULL)
+            self.assertEqual(ssh.call_args_list[0].args[0], ["true"])
+            self.assertEqual(ssh.call_args_list[1].args[0], ["sudo", "-n", "cloud-init", "status", "--wait"])
+
+
 class GuestGateTests(unittest.TestCase):
     def setUp(self):
         self.before = {"boot": "11111111-1111-1111-1111-111111111111", "machine": "c" * 32}

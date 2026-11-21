@@ -91,6 +91,28 @@ def kvm_probe():
         os.close(vm_fd)
 
 
+def qemu_stderr_diagnostic(stderr):
+    # Match only QEMU's own stderr, never serial/cloud-init/SSH output. Public
+    # summaries are fixed strings: filenames, paths and arbitrary text stay private.
+    cases = (
+        (r"failed to find romfile|could not load PC BIOS", "qemu-missing-rom", "QEMU could not find a firmware ROM."),
+        (r"Block node is read-only", "qemu-readonly-drive", "QEMU rejected a read-only block device."),
+        (r"Could not open", "qemu-image-open", "QEMU could not open an image."),
+        (r"Failed to get .*lock", "qemu-image-lock", "QEMU could not lock an image."),
+        (r"failed to initialize kvm|Could not access KVM kernel module|failed to create kvm vm", "qemu-kvm-init", "QEMU could not initialize KVM."),
+        (r"Cannot allocate memory|cannot set up guest memory", "qemu-memory", "QEMU could not allocate guest memory."),
+        (r"Could not set up host forwarding rule", "qemu-host-forward", "QEMU could not bind the loopback SSH forward."),
+        (r"Property .* not found|is not a valid device model name", "qemu-device-option", "QEMU rejected a device property or model."),
+        (r"invalid accelerator|invalid option|invalid parameter", "qemu-option", "QEMU rejected a command option."),
+        (r"error while loading shared libraries", "qemu-library", "QEMU could not load a runtime library."),
+    )
+    for line in stderr.decode("utf-8", errors="replace").splitlines():
+        for pattern, code, summary in cases:
+            if re.search(pattern, line, re.IGNORECASE):
+                return code, summary
+    return "qemu-early-exit", "QEMU exited before SSH readiness; unrecognized stderr withheld."
+
+
 def cloud_config(nonce, client_key, host_private, host_public, guest_script):
     return {
         "users": [
@@ -240,6 +262,17 @@ class Controller:
                          "-o", "ServerAliveCountMax=2", "coldboot-controller@127.0.0.1", shlex.join(args)],
                         timeout=timeout, data=data, check=check)
 
+    def record_qemu_exit(self, exit_code):
+        try:
+            with (self.work / "qemu.stderr").open("rb") as stream:
+                stderr = stream.read(64 * 1024)
+        except OSError:
+            stderr = b""
+        code, summary = qemu_stderr_diagnostic(stderr)
+        self.result.update(qemuExitCode=exit_code, qemuFailureStage=self.stage,
+                           qemuStderrSummary=summary)
+        self.stage = code
+
     def boot(self):
         validate_owned(self.work, self.parent, self.nonce, self.identity)
         require(self.proc is None or self.proc.poll() == 0)
@@ -253,12 +286,18 @@ class Controller:
                 "-drive", f"file={self.disk},format=qcow2,if=virtio",
                 "-drive", f"file={self.work / 'seed.img'},format=raw,if=virtio,readonly=on",
                 "-netdev", f"user,id=net0,hostfwd=tcp:127.0.0.1:{self.port}-:22",
-                "-device", "virtio-net-pci,netdev=net0"]
-        with (self.work / "qemu.log").open("ab") as output:
-            self.proc = subprocess.Popen(args, stdout=output, stderr=output)
+                # Disk boot uses the virtio NIC after Linux loads; no PXE ROM is needed.
+                "-device", "virtio-net-pci,netdev=net0,romfile="]
+        # Reset per-boot stderr so a previous boot's warning cannot mask this exit.
+        # The guest serial stream remains a separate private file.
+        with (self.work / "qemu.stderr").open("wb") as output:
+            self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=output)
         deadline = min(time.monotonic() + 240, self.deadline)
         while time.monotonic() < deadline:
-            require(self.proc.poll() is None)
+            exit_code = self.proc.poll()
+            if exit_code is not None:
+                self.record_qemu_exit(exit_code)
+                raise Failure()
             require(shutil.disk_usage(self.work).free >= GIB // 2)
             if self.ssh(["true"], check=False).returncode == 0:
                 self.ssh(["sudo", "-n", "cloud-init", "status", "--wait"], timeout=180)
