@@ -1,0 +1,42 @@
+name: rootless-guest-coldboot
+
+# One disposable amd64/private guest. No publishing or manual dispatch.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rootless-guest-coldboot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  coldboot:
+    name: private-amd64-guest-coldboot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      OMNIGENT_COLDBOOT_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Offline coldboot contracts
+        run: python3 -m unittest discover -s tests -p test_rootless_coldboot.py -v
+      - name: Install disposable VM tooling
+        run: |
+          sudo timeout 180 apt-get update
+          sudo timeout 180 apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils acl
+      - name: Install, power off, and verify a new guest boot
+        run: python3 tests/rootless-coldboot.py
+      - name: Upload only sanitized coldboot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootless-guest-coldboot-private-amd64-result
+          path: ${{ runner.temp }}/omnigent-coldboot-result.json
+          if-no-files-found: ignore
+          retention-days: 7

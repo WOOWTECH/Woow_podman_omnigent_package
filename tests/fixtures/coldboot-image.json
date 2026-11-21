@@ -1,0 +1,8 @@
+{
+  "url": "https://cloud-images.ubuntu.com/noble/20261017/noble-server-cloudimg-amd64.img",
+  "checksumsUrl": "https://cloud-images.ubuntu.com/noble/20261017/SHA256SUMS",
+  "sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
+  "architecture": "amd64",
+  "release": "24.04",
+  "date": "20261017"
+}

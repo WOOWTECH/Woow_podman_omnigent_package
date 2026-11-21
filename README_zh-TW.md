@@ -194,15 +194,28 @@ git pull
 scripts/upgrade.sh
 ```
 
-它會先為已安裝單元做快照、執行 `scripts/backup.sh`（pg_dump 加 volume 匯出）、執行
-`scripts/install.sh` 與 `tests/smoke.sh`；任何一步失敗就放回先前的單元、以先前的映像 tag 重啟。
-上游的資料庫 migration 是單向的：若新版 server 已經改了 schema，回復時也需要那份 dump，
-腳本會印出對應的 `scripts/restore.sh` 指令。
+**0.21.0-3 原生 MCP** 請依[升級與完整回復流程](docs/mcp-upgrade-rollback.md)操作。
+套件已固定來源 `459340b` 的 WOOW 通用 server `tag@digest`，並原樣納入 producer receipt
+`config/server-image.json`，記錄來源 commit、wheel/UI hash、架構與 CI run。dry-run 檢查這些資料，container smoke 另外比對實際映像與
+映像內 receipt。套件修訂為 0.21.0-3；核心與 host 維持 0.21.0、Pi 維持 0.85.1、runner 基底維持原樣。
+WOOW server 的 build tag 不需要與上游版號字串相同。
 
-升級 server 時要同時改 `quadlet/omnigent-server.container` 的 `Image=`、`Containerfile.runner`
-的 `ARG OMNIGENT_VERSION` 與 `VERSION`；三者不一致時 `tests/dryrun.sh` 會失敗。Server 與 Postgres
-映像寫成 `tag@sha256:<digest>`（podman 會驗證 digest、忽略 tag）；新版 tag 的 digest 用
-`skopeo inspect --format '{{.Digest}}' docker://ghcr.io/omnigent-ai/omnigent-server:v<version>` 取得。
+`upgrade.sh` 先保存舊 units，再執行 `backup.sh --stop --include-secrets`。失敗時放回舊 units，
+**保持 runner/server 停止**，印出對應的 `restore.sh --with-secrets` 指令。必須同時還原資料庫、
+artifacts、設定與 cookie secret，才能啟動舊映像；只切回 units 無法撤回 Alembic migration。
+
+### 外部 MCP URL
+
+在 `~/.config/omnigent/omnigent.env` 設定 `OMNIGENT_MCP_PUBLIC_BASE_URL`，填入**完整的外部部署
+base URL（含 prefix）**，例如 `https://agents.example.com/omnigent`。套件原樣傳入；明確設定時核心
+不會再附加 `OMNIGENT_WEB_BASE_PATH`。不要加 `/mcp` 或 profile token。只允許 HTTPS，開發環境的
+localhost、127.0.0.1、::1 可用 HTTP；不接受帳密、query、fragment 或 HA ingress 路徑。
+留空／舊 env 未提供此欄位時，採可信任的 accounts base URL；只有該 URL 無路徑時才加 web base path。
+
+核可升級後，在 Settings → Admin → Omnigent MCP 驗證連結帳號的密碼並複製網址。UI 使用 API 回傳的
+canonical `connection_url`，因此 MCP 與 UI 的 origin 可以不同。Profile URL 是憑證，不放入存取日誌、
+截圖或公開報告。反向代理需保留 MCP 路徑，支援 POST/GET/DELETE 與串流，不能要求瀏覽器登入 cookie。
+沿用既有 server port、network 與持久化 volumes。
 
 ### 從 0.19.1 到 0.21.0
 
@@ -233,15 +246,22 @@ session 的 0.12.0 資料庫，在 0.19.1 上全部完整接手（內建 agent �
 
 ```bash
 scripts/backup.sh                     # -> ~/backups/omnigent/<時間戳>/
-scripts/backup.sh --include-secrets   # 另外存資料庫與 admin 密碼（secrets.env，0600）
-scripts/backup.sh --stop              # 匯出 volume 前先停 runner 與 server，匯出完再啟動
+scripts/backup.sh --include-secrets   # 另外存資料庫、admin 與 operator 密碼（secrets.json，0600）
+scripts/backup.sh --stop              # DB dump 與 volume 匯出之前先停止 writers，完成後恢復原先執行者
 scripts/restore.sh ~/backups/omnigent/<時間戳> [--with-secrets]
 ```
 
 備份內容是資料庫的 `pg_dump -Fc`、`omnigent-server-data` 匯出、private 模式下的
-`omnigent-pi-data` 匯出，以及 env 檔副本。`restore.sh` 會停止 runner 與 server、依 dump 重建
-資料庫、取代 volume，並執行 smoke 測試。shared 模式的 `pi-agent-data` 屬於 pi-web 套件，
-這裡不備份也不還原。
+`omnigent-pi-data` 匯出，以及 env 與已安裝 units 的 checkpoint。`--stop` 會無條件停止兩個
+writers（包括 activating / auto-restart），確認程序、待執行 job 與容器均已停止，完成後只恢復
+原先執行或啟動中的服務。密碼使用附 checksum 的 JSON，保留空白、` #`、引號與換行。
+
+`restore.sh` 在停止服務或刪除資料前，先驗證三個必要密碼、dump/archive checksum 與格式，
+並要求已安裝 units/env 與 checkpoint 完全相符，包括舊映像 pin 與 Pi 模式。請先依
+[完整回復流程](docs/mcp-upgrade-rollback.md#full-rollback)放回舊 units/env，再還原資料庫及 volumes。
+完成後啟動舊服務與 health timer，才執行 smoke。可無損讀取舊式原始 `secrets.env`，但缺少 units
+checkpoint metadata 的備份會被拒絕；含 unit drop-in 的安裝也需另行驗證的備份流程。
+shared 模式的 `pi-agent-data` 屬於 pi-web 套件，這裡不備份也不還原。
 
 ## 解除安裝
 
@@ -318,9 +338,9 @@ scripts/converge.sh --rollback   # 放回先前的單元檔，用舊映像重新
 
 ### 回復
 
-`scripts/converge.sh --rollback` 會把儲存的單元檔放回去，reload 並重啟三個服務。收斂過程不會移除
-任何映像，所以舊的浮動 tag 仍在主機上，還原後的單元啟動的就是它先前跑的東西。除非事後輪替過
-secrets，否則資料庫完全未受影響；若已輪替，請一併從備份目錄還原 `omnigent.pgdump`。
+`scripts/converge.sh --rollback` **僅回復 units** 並重啟服務；不會還原 PostgreSQL、artifacts、設定
+或 cookie secret。MCP migration 後不能靠它降版，必須依[完整回復流程](docs/mcp-upgrade-rollback.md#full-rollback)
+還原相配的資料備份與舊映像 digest。保留舊映像；浮動 tag 不能當作已驗證的回復 pin。
 
 ### 重跑是安全的，而且不會移動回復點
 

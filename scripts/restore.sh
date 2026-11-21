@@ -3,7 +3,7 @@
 #
 #   scripts/restore.sh <backup_dir> [--with-secrets] [--yes]
 #
-#   --with-secrets   also restore the database, admin and operator passwords from secrets.env: the
+#   --with-secrets   also restore the database, admin and operator passwords from secrets.json (or a legacy secrets.env): the
 #                    role password is applied with ALTER ROLE and both DB secrets are
 #                    replaced, and the admin secret is set to the one that matches the
 #                    password hash in the dump
@@ -11,12 +11,15 @@
 #
 # Stops the runner and the server, DROPS and recreates the omnigent database from the dump,
 # replaces omnigent-server-data (and omnigent-pi-data when the backup has it), starts
-# everything again and runs tests/smoke.sh. Install the units first (scripts/install.sh).
+# everything again and runs tests/smoke.sh after starting the health timer. Requires the
+# matching checkpoint units/env already installed, including old image pins and Pi mode.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=lib/quadlet-lib.sh
 . "$REPO/scripts/lib/quadlet-lib.sh"
+# shellcheck source=writer-state.sh
+. "$REPO/scripts/writer-state.sh"
 APP=omnigent
 
 dir='' with_secrets=0 yes=0
@@ -35,19 +38,42 @@ export QL_APP=$APP
 ql_require_rootless
 ql_require_user_systemd
 ql_lock "$APP"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/omnigent-restore.XXXXXX")
+chmod 700 "$WORK"
+ql_cleanup restore_work rm -rf "$WORK"
 
 shopt -s nullglob
 dumps=("$dir"/"$APP"-*.dump)
 ((${#dumps[@]} == 1)) || ql_die "expected exactly one $APP-*.dump in $dir, found ${#dumps[@]}"
 dump=${dumps[0]}
-if [[ -f $dump.sha256 ]]; then
-  (cd -- "$dir" && sha256sum -c --quiet -- "${dump##*/}.sha256") || ql_die "checksum mismatch for $dump"
-else
-  ql_warn "no $dump.sha256; restoring without a checksum"
-fi
+[[ -f $dump.sha256 ]] || ql_die "missing checksum for ${dump##*/}"
+(cd -- "$dir" && sha256sum -c --quiet -- "${dump##*/}.sha256") || ql_die "checksum mismatch for $dump"
+for archive in "$dir"/omnigent-*-data-*.tar; do
+  [[ -f $archive.sha256 ]] || ql_die "missing checksum for ${archive##*/}"
+  (cd -- "$dir" && sha256sum -c --quiet -- "${archive##*/}.sha256") \
+    || ql_die "checksum mismatch for ${archive##*/}"
+  python3 "$REPO/scripts/backup-checkpoint.py" check-archive --archive "$archive" \
+    || ql_die "invalid volume archive; no data changed"
+done
+server_archives=("$dir"/omnigent-server-data-*.tar)
+((${#server_archives[@]} == 1)) || ql_die "expected exactly one server data archive (artifacts/config/cookie secret)"
 [[ $(systemctl --user show -p LoadState --value omnigent-server.service 2>/dev/null) == loaded ]] \
-  || ql_die "the omnigent units are not installed; run scripts/install.sh first"
-((with_secrets == 0)) || [[ -f $dir/secrets.env ]] || ql_die "--with-secrets: $dir/secrets.env not found"
+  || ql_die "the omnigent units are not installed; restore the matching checkpoint units first (see docs/mcp-upgrade-rollback.md)"
+pi_state=$(python3 "$REPO/scripts/backup-checkpoint.py" check --backup "$dir" \
+  --quadlet-dir "$(_ql_quadlet_dir)" --systemd-dir "$(_ql_sd_user_dir)" --env "$HOME/.config/omnigent/omnigent.env") \
+  || ql_die "restore requires matching checkpoint units/config, including old image pins and Pi mode; no data changed"
+pi_archives=("$dir"/omnigent-pi-data-*.tar)
+if [[ $pi_state == private ]]; then
+  ((${#pi_archives[@]} == 1)) || ql_die "private checkpoint requires exactly one private Pi archive"
+else
+  ((${#pi_archives[@]} == 0)) || ql_die "shared checkpoint must not contain a private Pi archive"
+fi
+if ((with_secrets)); then
+  python3 "$REPO/scripts/backup-checkpoint.py" prepare-secrets --backup "$dir" --output "$WORK" \
+    || ql_die "invalid or incomplete secrets archive; no data changed"
+fi
+podman exec -i omnigent-postgres pg_restore --list <"$dump" >/dev/null \
+  || ql_die "invalid PostgreSQL dump or unavailable database container; no data changed"
 
 if ((!yes)); then
   [[ -t 0 ]] || ql_die "restore drops the current omnigent database; add --yes to confirm non-interactively"
@@ -56,7 +82,9 @@ if ((!yes)); then
 fi
 
 ql_info "stopping the runner and the server (the database stays up for the restore)"
-systemctl --user stop omnigent-runner.service omnigent-server.service
+# Reload the verified old unit files before starting any checkpoint services.
+omnigent_stop_writers
+systemctl --user daemon-reload
 systemctl --user start omnigent-postgres.service
 QL_HEALTH_ACTIVE=1 ql_wait_container_healthy omnigent-postgres 180 || ql_die "omnigent-postgres is not healthy"
 
@@ -75,39 +103,21 @@ podman exec -i omnigent-postgres pg_restore -U omnigent -d omnigent --no-owner <
 ql_info "restored the database from ${dump##*/}"
 
 for t in "$dir"/omnigent-server-data-*.tar; do restore_volume omnigent-server-data omnigent-server-volume.service "$t"; done
-for t in "$dir"/omnigent-pi-data-*.tar; do
-  if [[ -f $HOME/.config/containers/systemd/omnigent-pi.volume ]]; then
-    restore_volume omnigent-pi-data omnigent-pi-volume.service "$t"
-  else
-    ql_warn "this host runs shared pi state; skipping ${t##*/}"
-  fi
-done
-
-if ((with_secrets)); then
-  ql_env_load "$dir/secrets.env"
-  if [[ -n ${QL_ENV[OMNIGENT_POSTGRES_PASSWORD]+x} ]]; then
-    # The dump carries no role password: put the backup's password back on the role, then
-    # replace both database secrets so the server can connect again.
-    pw=${QL_ENV[OMNIGENT_POSTGRES_PASSWORD]}
-    [[ $pw =~ ^[A-Za-z0-9._~-]+$ ]] || ql_die "the backup's database password needs URL encoding; rotate it instead (scripts/rotate-secrets.sh --db)"
-    printf "ALTER ROLE omnigent PASSWORD '%s';\n" "$pw" | psql_stdin || ql_die "ALTER ROLE failed"
-    ql_secret_ensure omnigent-postgres-password env:OMNIGENT_POSTGRES_PASSWORD --replace
-    # shellcheck disable=SC2034 # read by ql_secret_ensure through env:OMNIGENT_DATABASE_URL_VALUE
-    OMNIGENT_DATABASE_URL_VALUE="postgresql+psycopg://omnigent:$pw@omnigent-postgres:5432/omnigent"
-    pw=''
-    ql_secret_ensure omnigent-database-url env:OMNIGENT_DATABASE_URL_VALUE --replace
-    # shellcheck disable=SC2034 # cleared on purpose; ql_secret_ensure already read it
-    OMNIGENT_DATABASE_URL_VALUE=''
-  fi
-  if [[ -n ${QL_ENV[OMNIGENT_ADMIN_PASSWORD]+x} ]]; then
-    ql_secret_ensure omnigent-admin-password env:OMNIGENT_ADMIN_PASSWORD --replace
-  fi
-  if [[ -n ${QL_ENV[OMNIGENT_RUNNER_PASSWORD]+x} ]]; then
-    ql_secret_ensure omnigent-runner-password env:OMNIGENT_RUNNER_PASSWORD --replace
-  fi
+if [[ $pi_state == private ]]; then
+  restore_volume omnigent-pi-data omnigent-pi-volume.service "${pi_archives[0]}"
 fi
 
+if ((with_secrets)); then
+  psql_stdin <"$WORK/restore-role.sql" || ql_die "ALTER ROLE failed"
+  for name in omnigent-postgres-password omnigent-database-url omnigent-admin-password omnigent-runner-password; do
+    ql_secret_ensure "$name" "file:$WORK/$name" --replace
+  done
+fi
+
+# The preflight proved installed units AND env match this checkpoint byte for byte.
+# Never re-render using the candidate checkout: the recorded old image pins must stay.
 systemctl --user restart omnigent-server.service omnigent-runner.service
 QL_HEALTH_ACTIVE=1 ql_wait_container_healthy omnigent-server 180 || ql_die "omnigent-server did not become healthy after the restore"
+systemctl --user start omnigent-server-health.timer || ql_die "could not start health timer"
 "$REPO/tests/smoke.sh" || ql_die "tests/smoke.sh failed after the restore"
 ql_info "restore complete"

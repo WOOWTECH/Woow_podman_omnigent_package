@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # scripts/upgrade.sh: move omnigent to the versions this checkout pins, with an automatic
-# rollback of the units when the new version fails its smoke test.
+# rollback of the units when the new version fails its smoke test; leaves writers stopped.
 #
 #   git pull && scripts/upgrade.sh [--no-backup]
 #
 #   1. snapshot the installed unit files and the install manifest
-#   2. scripts/backup.sh: pg_dump + volume exports        (skipped with --no-backup)
+#   2. scripts/backup.sh --stop --include-secrets: consistent dump + volumes        (skipped with --no-backup)
 #   3. scripts/install.sh: pulls the pinned server image, builds the runner tag if missing,
 #      re-renders the units, restarts what changed, then runs tests/smoke.sh
-#   4. on any failure: put the snapshot back, restart, re-run tests/smoke.sh, exit 1
+#   4. on any failure: stop writers, put the snapshot back, print data restore command, exit 1
 #
 # The previous image tags are never deleted, so the restored units start the old versions.
 # Upstream's database migrations are one-way: if the new server migrated the schema, the
@@ -20,7 +20,6 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=lib/quadlet-lib.sh
 . "$REPO/scripts/lib/quadlet-lib.sh"
 APP=omnigent
-UNITS=(omnigent-postgres.service omnigent-server.service omnigent-runner.service)
 KEEP_SNAPSHOTS=5
 
 backup=1
@@ -33,8 +32,10 @@ while (($#)); do
   shift
 done
 export QL_APP=$APP
+python3 "$REPO/scripts/verify-server-image.py" || ql_die "server image receipt validation failed; nothing was changed"
 ql_require_rootless
 ql_require_user_systemd
+ql_lock "$APP"
 STATE=${QL_STATE_ROOT:-$HOME/.local/state/woow-quadlet}/$APP
 [[ -s $STATE/manifest ]] || ql_die "$APP is not installed (no $STATE/manifest); run scripts/install.sh"
 
@@ -54,6 +55,7 @@ if ((${#snaps[@]} > KEEP_SNAPSHOTS)); then rm -rf -- "${snaps[@]:0:${#snaps[@]}-
 backup_dir=''
 rollback() {
   local path rel
+  systemctl --user stop omnigent-runner.service omnigent-server.service
   ql_warn "upgrade failed: rolling back to the snapshot $snap"
   if [[ -f $STATE/manifest ]]; then
     while read -r _ path; do
@@ -68,23 +70,20 @@ rollback() {
   cp -p -- "$snap/manifest" "$STATE/manifest"
   rm -f -- "$STATE/pending-restart"
   systemctl --user daemon-reload
-  systemctl --user restart "${UNITS[@]}" || ql_die "rollback: restart failed; see journalctl --user -u omnigent-server -n 100"
-  QL_HEALTH_ACTIVE=1 ql_wait_container_healthy omnigent-server 180 || ql_warn "rollback: omnigent-server is not healthy yet"
-  if env -u SMOKE_FORCE_FAIL "$REPO/tests/smoke.sh"; then
-    ql_warn "rolled back; the previous version is running again"
+  ql_warn "previous units restored; application services remain stopped because the database may have migrated"
+  if [[ -n $backup_dir ]]; then
+    ql_warn "restore the complete pre-upgrade checkpoint before starting the old application:"
+    printf '    %q/scripts/restore.sh %q --with-secrets\n' "$REPO" "$backup_dir" >&2
   else
-    ql_warn "rolled back, but tests/smoke.sh still fails."
-    if [[ -n $backup_dir ]]; then
-      ql_warn "if the new server migrated the database schema, restore the dump as well:"
-      printf '    %s/scripts/restore.sh %s\n' "$REPO" "$backup_dir" >&2
-    fi
+    ql_warn "--no-backup was used: supply a verified pre-upgrade backup before restarting"
   fi
+  ql_warn "see docs/mcp-upgrade-rollback.md; units alone do not roll back Alembic"
   exit 1
 }
 
 # ---- 2. backup -------------------------------------------------------------------------------
 if ((backup)); then
-  backup_dir=$("$REPO/scripts/backup.sh") || ql_die "backup failed; nothing was changed"
+  backup_dir=$("$REPO/scripts/backup.sh" --stop --include-secrets) || ql_die "backup failed; nothing was changed"
   ql_info "pre-upgrade backup: $backup_dir"
 fi
 
