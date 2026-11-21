@@ -1,0 +1,63 @@
+name: rootless-acceptance
+
+# Disposable private-Pi acceptance. This workflow never publishes images.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rootless-acceptance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  private-amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Offline harness contract tests
+        run: python3 -m unittest discover -s tests -p test_rootless_acceptance.py -v
+      - name: Prepare disposable rootless host
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session jq curl
+          podman --version | grep -E '^podman version 4\.9\.'
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" -ne 0
+          ci_user=$(id -un)
+          ci_uid=$(id -u)
+          # Hosted runners are disposable; create a subordinate mapping only if absent.
+          if ! grep -q "^${ci_user}:" /etc/subuid; then
+            sudo usermod --add-subuids 1000000-1065535 "$ci_user"
+          fi
+          if ! grep -q "^${ci_user}:" /etc/subgid; then
+            sudo usermod --add-subgids 1000000-1065535 "$ci_user"
+          fi
+          sudo loginctl enable-linger "$ci_user"
+          sudo systemctl start "user@${ci_uid}.service"
+          printf 'XDG_RUNTIME_DIR=/run/user/%s\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%s/bus\n' "$ci_uid" "$ci_uid" >> "$GITHUB_ENV"
+      - name: Install browser dependencies
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Real private-Pi acceptance on amd64
+        run: bash tests/rootless-acceptance.sh
+      - name: Publish only sanitized acceptance result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootless-private-amd64-result
+          path: ${{ runner.temp }}/omnigent-rootless-result.json
+          if-no-files-found: ignore
+          retention-days: 7
