@@ -3,7 +3,7 @@
 Versions are `<omnigent version>-<package revision>`, the same string as `VERSION` and the tag
 of the runner image.
 
-## 0.21.0-3 — Unreleased
+## 0.21.0-3 — 2026-11-21
 
 - Package native MCP on upstream core/host 0.21.0 with the verified WOOW generic server
   image from source `459340b`, CI run `44896274348` attempt `1`, and its unchanged receipt.
