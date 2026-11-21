@@ -1,6 +1,6 @@
 name: rootless-acceptance
 
-# Disposable private-Pi acceptance. This workflow never publishes images.
+# Disposable native-architecture upgrade/rollback acceptance. Never publishes images.
 on:
   pull_request:
     branches: [main]
@@ -13,26 +13,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  private-amd64:
-    runs-on: ubuntu-24.04
+  acceptance:
+    name: ${{ matrix.pi_state }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    strategy:
+      max-parallel: 2
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64, machine: x86_64, pi_state: private}
+          - {runner: ubuntu-24.04, arch: amd64, machine: x86_64, pi_state: shared}
+          - {runner: ubuntu-24.04-arm, arch: arm64, machine: aarch64, pi_state: private}
+          - {runner: ubuntu-24.04-arm, arch: arm64, machine: aarch64, pi_state: shared}
+    env:
+      OMNIGENT_ROOTLESS_HEAD: ${{ github.event.pull_request.head.sha }}
+      OMNIGENT_ROOTLESS_ARCH: ${{ matrix.arch }}
+      OMNIGENT_ROOTLESS_PI_STATE: ${{ matrix.pi_state }}
+      OMNIGENT_ROOTLESS_LEGACY_DIR: ${{ github.workspace }}/.rootless-legacy
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check out the exact legacy package
+        uses: actions/checkout@v4
+        with:
+          ref: 431759826c6e6ea25579b05051de102699e54229
+          path: .rootless-legacy
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Offline harness contract tests
-        run: python3 -m unittest discover -s tests -p test_rootless_acceptance.py -v
+        run: |
+          python3 -m unittest discover -s tests -p test_rootless_acceptance.py -v
+          python3 -m unittest discover -s tests -p test_rootless_legacy.py -v
       - name: Prepare disposable rootless host
         shell: bash
+        env:
+          EXPECTED_MACHINE: ${{ matrix.machine }}
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs dbus-user-session jq curl
           podman --version | grep -E '^podman version 4\.9\.'
-          test "$(uname -m)" = x86_64
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
           test "$(id -u)" -ne 0
           ci_user=$(id -un)
           ci_uid=$(id -u)
@@ -51,13 +77,13 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: Real private-Pi acceptance on amd64
+      - name: Real legacy upgrade and checkpoint restore
         run: bash tests/rootless-acceptance.sh
       - name: Publish only sanitized acceptance result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rootless-private-amd64-result
+          name: rootless-${{ matrix.pi_state }}-${{ matrix.arch }}-result
           path: ${{ runner.temp }}/omnigent-rootless-result.json
           if-no-files-found: ignore
           retention-days: 7

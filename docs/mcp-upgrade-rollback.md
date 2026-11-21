@@ -212,6 +212,82 @@ restores units and immediately restarts services.
    image identity and restore result. Keep the release coordinator's receipt private where
    it contains deployment identifiers; publish only sanitized build/test evidence.
 
+## Disposable CI acceptance
+
+`.github/workflows/rootless-acceptance.yml` runs four independent PR jobs, with at most two
+running together and a 45-minute timeout per job:
+
+| Native runner | Architecture | Pi state |
+| --- | --- | --- |
+| `ubuntu-24.04` | amd64 | private |
+| `ubuntu-24.04` | amd64 | shared synthetic volume |
+| `ubuntu-24.04-arm` | arm64 | private |
+| `ubuntu-24.04-arm` | arm64 | shared synthetic volume |
+
+Each job requires Podman 4.9, rootless operation, cgroup v2, a working systemd user manager
+and linger. The harness refuses existing package state, units, named containers, secrets or
+volumes. It is destructive and intentionally refuses ordinary hosts. Do not run it against
+an existing installation.
+
+### Exact A → B upgrade and two restore exercises
+
+1. Check out B at the PR's actual head SHA, assert `git rev-parse HEAD` matches the injected
+   reviewed SHA, and separately check out A at
+   `431759826c6e6ea25579b05051de102699e54229` (package **0.21.0-2**). Assert A is unchanged and
+   B is **0.21.0-3**. A's installer builds its own runner from that checkout with `--rebuild`
+   (normal build layer caching is allowed) and pulls A's existing immutable server pin.
+   Both retain **Pi 0.85.1 / host 0.21.0**.
+2. Install A using its supported accounts-base setting. Do not pass the B-only
+   `OMNIGENT_MCP_PUBLIC_BASE_URL` setting to A. Seed synthetic accounts/passwords, private
+   and shared sessions, ordered items, ACLs, an agent, a paused task and artifact hashes.
+   Verify old head `d0a1f879a01d` and absence of the MCP table/indexes.
+3. Use **B's backup script against the installed A units** with `--stop --include-secrets`.
+   A's original backup does not capture the checkpoint metadata needed by B's restore.
+   Verify the exact backup inventory and installed unit/env hashes, then wait for resumed
+   HTTP readiness. The old server/runner pins remain in this checkpoint.
+4. Run one B upgrade command with `SMOKE_FORCE_FAIL=1`. Require a nonzero result, the exact
+   forced-smoke marker, new head `za3b4c5d6e7f` with the expected valid MCP indexes, automatic
+   restoration of A's exact units/config, and stopped writers (unit state, processes,
+   pending jobs and named containers). An ordinary install failure cannot satisfy this step.
+5. While writers remain stopped, mutate only synthetic DB rows, server/private Pi markers,
+   persisted cookie secret and all four Podman secrets. In shared mode the live external
+   peer writes its own post-checkpoint marker. Stop the health timer and use **B's restore
+   script** on the A checkpoint. Verify old schema, original seeded data/ACLs/artifact hashes,
+   secret hashes, cookie, unit/config identity and the expected Pi state.
+6. Perform the actual successful **A → B** upgrade. Recheck the migrated schema/indexes and
+   seeded baseline, then configure B's explicit complete public MCP base through its installer.
+   Run the image receipt probe and browser MCP creation, canonical URL, anonymous connection
+   and revocation checks.
+7. Create active/revoked MCP profiles. Verify their original URLs and states after service
+   restart and a separately labelled same-candidate upgrade. Take a B checkpoint, wait for
+   HTTP readiness, mutate profiles (including a new post-checkpoint profile), stop writers,
+   mutate legacy DB rows/storage/secrets, and restore B. Verify the active/revoked states,
+   absence of the post-checkpoint profile, all seeded data and runtime source receipt.
+
+The shared fixture's `pi-agent-data` volume and `omnigent-rootless-peer` container belong to
+the harness and are created only after fresh-host checks. The peer uses the installed A
+runner image with no network and the same UID mapping as the runner. Bidirectional marker
+checks prove filesystem interoperability. Both checkpoint inventories exclude the external
+volume and peer; both restores must retain the peer's post-checkpoint write and original
+container ID/start time. Only harness cleanup removes these synthetic external resources.
+This does not exercise the full Pi web application or shared provider login credentials.
+
+### Evidence and limits
+
+The only uploaded artifact is `rootless-<private|shared>-<amd64|arm64>-result`, containing
+`omnigent-rootless-result.json`: completed stages, failure stage and allowlisted failure
+code, actual A/B Git SHAs, reviewed B SHA, architecture/mode, candidate source/image digest,
+rootless preflight result and cleanup result. Tokens, URLs containing tokens, passwords,
+logs, dumps, browser output and private fixture state are never uploaded. Random synthetic
+credentials require no paid provider credentials. The jobs publish no images, tags or releases.
+
+A passing cell proves only that architecture/mode on that disposable hosted runner. The
+matrix must run successfully before its A → B, shared-mode or arm64 coverage is claimed.
+The previously passed private amd64 job at package `ed6440b` tested restart, same-candidate
+upgrade, browser MCP and checkpoint restore; it did not test this expanded matrix.
+Cold boot, full Pi web application integration and paid model execution remain separate
+acceptance items. Offline fixture tests prove harness contracts, not container operation.
+
 ## Rootless acceptance evidence
 
 Run these on the explicitly authorized candidate host, for both private and shared Pi modes:

@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 import subprocess
 import sys
@@ -19,7 +20,7 @@ PROFILE_API = BASE + "/v1/admin/mcp-server/profiles"
 SECRET_NAMES = ("omnigent-postgres-password", "omnigent-admin-password",
                 "omnigent-runner-password", "omnigent-database-url")
 FAILURE_STEPS = frozenset({"dispatch", "login", "create", "revoke", "secret-hash", "cookie",
-                           "marker", "probe", "profile-list", "state", "browser"})
+                           "marker", "probe", "profile-list", "state", "browser", "inventory", "storage", "peer"})
 current_step = "dispatch"
 MARKERS = (("omnigent-server", "/data/artifacts/rootless-ci-marker"),
            ("omnigent-runner", "/data/pi-agent/rootless-ci-marker"))
@@ -106,6 +107,116 @@ def marker_write(value):
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+
+def pi_mode():
+    mode = os.environ.get("OMNIGENT_ROOTLESS_PI_STATE", "private")
+    require(mode in ("private", "shared"), "invalid Pi fixture mode")
+    return mode
+
+
+def peer_identity():
+    return subprocess.check_output(["podman", "inspect", "--format", "{{.Id}}|{{.State.StartedAt}}",
+                                    "omnigent-rootless-peer"], text=True, stderr=subprocess.DEVNULL).strip()
+
+
+def peer_write(value):
+    subprocess.run(["podman", "exec", "omnigent-rootless-peer", "sh", "-c",
+                    'printf %s "$1" > /data/pi-agent/rootless-ci-marker', "marker", value],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def peer_check(state, value):
+    require(peer_identity() == state["peerIdentity"], "shared peer was recreated or restarted")
+    for container in ("omnigent-rootless-peer", "omnigent-runner"):
+        actual = subprocess.check_output(["podman", "exec", container, "cat", MARKERS[1][1]], stderr=subprocess.DEVNULL)
+        require(actual == value, "shared filesystem marker differs")
+
+
+def storage_prepare():
+    state = {"piState": pi_mode(), "secrets": run_step("secret-hash", secret_hashes),
+             "cookie": run_step("cookie", cookie_hash)}
+    run_step("marker", marker_write, "checkpoint")
+    if pi_mode() == "shared":
+        state["peerIdentity"] = run_step("peer", peer_identity)
+        run_step("peer", peer_check, state, b"checkpoint")
+        # Prove writes in both directions, without running a full Pi web application.
+        run_step("peer", peer_write, "peer-wrote-checkpoint")
+        run_step("peer", peer_check, state, b"peer-wrote-checkpoint")
+        run_step("peer", peer_write, "checkpoint")
+    return state
+
+
+def storage_check(state, restored=False):
+    require(state["piState"] == pi_mode(), "fixture mode changed")
+    require(run_step("secret-hash", secret_hashes) == state["secrets"], "password secrets changed")
+    require(run_step("cookie", cookie_hash) == state["cookie"], "cookie secret changed")
+    for container, marker in MARKERS:
+        expected = b"external-after-checkpoint" if restored and pi_mode() == "shared" and container == "omnigent-runner" else b"checkpoint"
+        value = run_step("marker", subprocess.check_output,
+                         ["podman", "exec", container, "cat", marker], stderr=subprocess.DEVNULL)
+        require(value == expected, "server/private Pi artifact checkpoint differs")
+    if pi_mode() == "shared":
+        run_step("peer", peer_check, state, b"external-after-checkpoint" if restored else b"checkpoint")
+
+
+def stopped_writers():
+    repo = Path(__file__).resolve().parents[1]
+    subprocess.run(["bash", "-c", '. "$1/scripts/lib/quadlet-lib.sh"; . "$1/scripts/writer-state.sh"; omnigent_assert_writers_stopped',
+                    "fixture", str(repo)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def storage_mutate():
+    stopped_writers()
+    image = "localhost/woow-omnigent-runner:0.21.0-2"
+    # Only the fixture marker and the persisted cookie secret are modified on the
+    # stopped package volumes. The live peer owns writes to the shared volume.
+    subprocess.run(["podman", "run", "--rm", "--network=none", "--entrypoint=/bin/sh",
+                    "-v", "omnigent-server-data:/fixture", image, "-c",
+                    'printf changed > /fixture/artifacts/rootless-ci-marker && printf %s "$1" > /fixture/artifacts/accounts-cookie-secret',
+                    "fixture", secrets.token_hex(32)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if pi_mode() == "private":
+        subprocess.run(["podman", "run", "--rm", "--network=none", "--userns=keep-id:uid=1000,gid=1000",
+                        "--entrypoint=/bin/sh", "-v", "omnigent-pi-data:/fixture", image, "-c",
+                        'printf changed > /fixture/rootless-ci-marker'],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        peer_write("external-after-checkpoint")
+    # Restore must replace actual secrets, not merely retain unchanged hashes.
+    for name in SECRET_NAMES:
+        subprocess.run(["podman", "secret", "create", "--replace", name, "-"],
+                       input=secrets.token_hex(24).encode(), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    stopped_writers()
+
+
+def inventory(path):
+    mode = pi_mode()
+    metadata = json.loads((path / "checkpoint.json").read_text())
+    require(metadata["piState"] == mode, "checkpoint mode differs")
+    expected = {"checkpoint.json", "omnigent.env", "units", "secrets.json", "secrets.json.sha256", "writer-states.tsv"}
+    patterns = ["omnigent-*.dump", "omnigent-server-data-*.tar"]
+    if mode == "private": patterns.append("omnigent-pi-data-*.tar")
+    for pattern in patterns:
+        matches = list(path.glob(pattern))
+        require(len(matches) == 1, "checkpoint inventory differs")
+        expected.update((matches[0].name, matches[0].name + ".sha256"))
+    require({p.name for p in path.iterdir()} == expected, "unexpected checkpoint content")
+    require(all("pi-agent-data" not in key and "peer" not in key for key in metadata["units"]),
+            "external shared resources entered checkpoint")
+    saved_units = {p.relative_to(path / "units").as_posix() for p in (path / "units").rglob("*") if p.is_file()}
+    require(saved_units == {key for key, value in metadata["units"].items() if value is not None},
+            "checkpoint unit files differ")
+    require(not any(p.is_symlink() for p in path.rglob("*")), "checkpoint contains a symlink")
+    require(list(path.parent.iterdir()) == [path], "ambiguous checkpoint directory")
+
+
+def checkpoint_seed(path):
+    save(path, storage_prepare())
+
+
+def checkpoint_restored(path):
+    storage_check(json.loads(path.read_text()), restored=True)
+
+
 def cookie_hash():
     return subprocess.check_output(["podman", "exec", "omnigent-server", "sha256sum", "/data/artifacts/accounts-cookie-secret"],
                                    text=True, stderr=subprocess.DEVNULL).split()[0]
@@ -116,9 +227,7 @@ def prepare(path):
     state = {"active": run_step("create", create, token, "rootless-retained"),
              "revoked": run_step("create", create, token, "rootless-revoked")}
     run_step("revoke", revoke, token, state["revoked"])
-    state["secrets"] = run_step("secret-hash", secret_hashes)
-    state["cookie"] = run_step("cookie", cookie_hash)
-    run_step("marker", marker_write, "checkpoint")
+    state.update(storage_prepare())
     run_step("state", save, path, state)
     check(path)
 
@@ -135,12 +244,7 @@ def check(path, restored=False):
     if restored:
         require(state["afterCheckpoint"]["id"] not in rows, "database restore retained post-checkpoint data")
         run_step("probe", probe, state["afterCheckpoint"], False)
-    require(run_step("secret-hash", secret_hashes) == state["secrets"], "password secrets changed")
-    require(run_step("cookie", cookie_hash) == state["cookie"], "cookie secret changed")
-    for container, marker in MARKERS:
-        value = run_step("marker", subprocess.check_output,
-                         ["podman", "exec", container, "cat", marker], stderr=subprocess.DEVNULL)
-        require(value == b"checkpoint", "server/private Pi artifact checkpoint differs")
+    storage_check(state, restored=restored)
 
 
 def mutate(path):
@@ -163,11 +267,15 @@ def browser():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("prepare", "check", "mutate", "restored", "browser"))
+    parser.add_argument("phase", choices=("prepare", "check", "mutate", "restored", "browser", "checkpoint-seed", "checkpoint-restored", "storage-mutate", "inventory"))
     parser.add_argument("state", type=Path)
     args = parser.parse_args()
     try:
-        if args.phase == "browser": run_step("browser", browser)
+        if args.phase == "inventory": run_step("inventory", inventory, args.state)
+        elif args.phase == "checkpoint-seed": run_step("storage", checkpoint_seed, args.state)
+        elif args.phase == "checkpoint-restored": run_step("storage", checkpoint_restored, args.state)
+        elif args.phase == "storage-mutate": run_step("storage", storage_mutate)
+        elif args.phase == "browser": run_step("browser", browser)
         elif args.phase == "restored": check(args.state, restored=True)
         else: run_step("dispatch", {"prepare": prepare, "check": check, "mutate": mutate}[args.phase], args.state)
     except (ValueError, KeyError, TypeError, AttributeError, OSError, URLError, subprocess.SubprocessError):
